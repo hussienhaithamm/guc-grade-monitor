@@ -35,6 +35,11 @@ DEFAULT_CHECK_START = "09:00"
 DEFAULT_CHECK_END = "17:30"
 DEFAULT_STATE_FILE = "state/last_seen.json"
 MAX_EMAIL_BODY_CHARS = 12000
+BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/125.0.0.0 Safari/537.36"
+)
 
 _NTLM_SESSION = None
 
@@ -378,8 +383,9 @@ def request_url(
         )
 
     headers = {
-        "User-Agent": "Mozilla/5.0 grade-monitor/1.0",
+        "User-Agent": BROWSER_USER_AGENT,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
     }
     if cookie_header:
         headers["Cookie"] = cookie_header
@@ -437,8 +443,9 @@ def request_url_with_ntlm(
         _NTLM_SESSION = session
 
     headers = {
-        "User-Agent": "Mozilla/5.0 grade-monitor/1.0",
+        "User-Agent": BROWSER_USER_AGENT,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
     }
     if referer:
         headers["Referer"] = referer
