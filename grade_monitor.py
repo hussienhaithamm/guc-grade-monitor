@@ -595,11 +595,17 @@ def page_diagnostics(result: FetchResult, visible_line_count: int) -> str:
         script_text,
         re.I,
     )
+    null_chars = result.text.count("\x00")
+    whitespace_chars = sum(1 for char in result.text if char.isspace())
+    control_chars = sum(1 for char in result.text if ord(char) < 32 and not char.isspace())
+    prefix_codepoints = " ".join(f"{ord(char):02x}" for char in result.text[:24]) or "none"
 
     return (
         f"final_url={canonicalize_transcript_url(result.final_url)}; "
         f"status={result.status}; response_length={len(result.text)}; "
         f"visible_lines={visible_line_count}; "
+        f"whitespace_chars={whitespace_chars}; control_chars={control_chars}; null_chars={null_chars}; "
+        f"prefix_codepoints={prefix_codepoints}; "
         f"title={limited_join([''.join(parser.title_parts)])}; "
         f"forms={len(parser.forms)}; inputs={len(parser.inputs)}; selects={limited_join(parser.selects)}; "
         f"meta_refresh={limited_join(parser.meta_refreshes)}; "
