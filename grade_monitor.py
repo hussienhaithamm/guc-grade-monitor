@@ -241,6 +241,49 @@ def parse_hhmm(value: str) -> time:
     return time(int(hour), int(minute))
 
 
+def declared_charset(content_type: str) -> str | None:
+    match = re.search(r"charset=([^;\s]+)", content_type, re.I)
+    return match.group(1) if match else None
+
+
+def decode_response_body(body: bytes, content_type: str = "") -> str:
+    if not body:
+        return ""
+
+    if body.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return body.decode("utf-16", errors="replace")
+    if body.startswith(b"\xef\xbb\xbf"):
+        return body.decode("utf-8-sig", errors="replace")
+
+    even_bytes = body[0::2]
+    odd_bytes = body[1::2]
+    even_null_ratio = even_bytes.count(0) / max(len(even_bytes), 1)
+    odd_null_ratio = odd_bytes.count(0) / max(len(odd_bytes), 1)
+    if odd_null_ratio > 0.25 and even_null_ratio < 0.05:
+        return body.decode("utf-16le", errors="replace")
+    if even_null_ratio > 0.25 and odd_null_ratio < 0.05:
+        return body.decode("utf-16be", errors="replace")
+
+    charset = declared_charset(content_type)
+    candidates = [charset] if charset else []
+    candidates.extend(["utf-8", "windows-1256", "cp1252"])
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate:
+            continue
+        normalized = candidate.lower()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        try:
+            return body.decode(candidate)
+        except (LookupError, UnicodeDecodeError):
+            continue
+
+    return body.decode("utf-8", errors="replace")
+
+
 def within_check_window(now: datetime) -> bool:
     if parse_bool(env("FORCE_CHECK"), False):
         return True
@@ -352,9 +395,7 @@ def request_url(
     try:
         with urlopen(req, timeout=30) as response:
             content_type = response.headers.get("Content-Type", "")
-            match = re.search(r"charset=([^;\s]+)", content_type, re.I)
-            charset = match.group(1) if match else "utf-8"
-            body = response.read().decode(charset, errors="replace")
+            body = decode_response_body(response.read(), content_type)
             return FetchResult(
                 url=url,
                 final_url=response.geturl(),
@@ -422,12 +463,11 @@ def request_url_with_ntlm(
     if response.status_code >= 400:
         raise MonitorError(f"{url} returned HTTP {response.status_code}.")
 
-    response.encoding = response.encoding or "utf-8"
     return FetchResult(
         url=url,
         final_url=response.url,
         status=response.status_code,
-        text=response.text,
+        text=decode_response_body(response.content, response.headers.get("Content-Type", "")),
     )
 
 

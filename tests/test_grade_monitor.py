@@ -80,6 +80,10 @@ class GradeMonitorTests(unittest.TestCase):
         self.assertFalse(gm.parse_bool(None))
         self.assertTrue(gm.parse_bool(None, default=True))
 
+    def test_decode_response_body_detects_utf16_without_charset(self) -> None:
+        html = "<html><body>Transcript</body></html>"
+        self.assertEqual(gm.decode_response_body(html.encode("utf-16le")), html)
+
     def test_check_window_and_friday_skip(self) -> None:
         with mock.patch.dict(os.environ, {"CHECK_START": "09:00", "CHECK_END": "17:30", "SKIP_DAYS": "friday"}, clear=True):
             cairo = ZoneInfo("Africa/Cairo")
