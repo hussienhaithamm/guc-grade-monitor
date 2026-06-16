@@ -51,7 +51,7 @@ jobs:
 
       - name: Check transcript
         env:
-          TRANSCRIPT_URL: ${{ vars.TRANSCRIPT_URL }}
+          TRANSCRIPT_URL: ${{ secrets.TRANSCRIPT_URL || vars.TRANSCRIPT_URL }}
           GUC_USERNAME: ${{ secrets.GUC_USERNAME }}
           GUC_PASSWORD: ${{ secrets.GUC_PASSWORD }}
           SESSION_COOKIE: ${{ secrets.SESSION_COOKIE }}

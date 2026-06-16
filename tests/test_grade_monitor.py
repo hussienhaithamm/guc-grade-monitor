@@ -105,10 +105,14 @@ class GradeMonitorTests(unittest.TestCase):
         generated_url = "https://apps.guc.edu.eg/student_ext/Grade/Transcript_001.aspx?v=SMP359651"
         self.assertEqual(gm.canonicalize_transcript_url(generated_url), gm.DEFAULT_TRANSCRIPT_URL)
 
-    def test_load_urls_strips_generated_v_parameter(self) -> None:
+    def test_load_urls_preserves_generated_v_parameter_for_fetching(self) -> None:
         generated_url = "https://apps.guc.edu.eg/student_ext/Grade/Transcript_001.aspx?v=SMP359651"
         with mock.patch.dict(os.environ, {"TRANSCRIPT_URL": generated_url}, clear=True):
-            self.assertEqual(gm.load_urls(), [gm.DEFAULT_TRANSCRIPT_URL])
+            self.assertEqual(gm.load_urls(), [generated_url])
+
+    def test_generated_url_candidates_try_given_url_then_stable_url(self) -> None:
+        generated_url = "https://apps.guc.edu.eg/student_ext/Grade/Transcript_001.aspx?v=SMP359651"
+        self.assertEqual(gm.transcript_url_candidates(generated_url), [generated_url, gm.DEFAULT_TRANSCRIPT_URL])
 
     def test_transcript_url_keeps_non_v_query_parameters(self) -> None:
         url = "https://apps.guc.edu.eg/student_ext/Grade/Transcript_001.aspx?x=1&v=SMP359651"
@@ -151,6 +155,65 @@ class GradeMonitorTests(unittest.TestCase):
         self.assertIn("Current Cumulative GPA", monitored)
         self.assertNotIn("Choose Season", monitored)
         self.assertNotIn("ShortCuts", monitored)
+
+    def test_build_monitored_text_uses_stable_url_for_generated_url(self) -> None:
+        result = gm.FetchResult(TRANSCRIPT_URL, TRANSCRIPT_URL, 200, SELECTED_HTML)
+        monitored = gm.build_monitored_text([result], "2025-2026")
+
+        self.assertIn(f"URL: {gm.DEFAULT_TRANSCRIPT_URL}", monitored)
+        self.assertNotIn("?v=test", monitored)
+
+    def test_build_monitored_text_rejects_empty_visible_page(self) -> None:
+        result = gm.FetchResult(gm.DEFAULT_TRANSCRIPT_URL, gm.DEFAULT_TRANSCRIPT_URL, 200, "<html><body></body></html>")
+
+        with self.assertRaisesRegex(gm.MonitorError, "No visible transcript text"):
+            gm.build_monitored_text([result], "2025-2026")
+
+    def test_build_monitored_text_rejects_unrelated_visible_page(self) -> None:
+        html = "<html><body><h1>Student Portal</h1><div>Main</div><div>Evaluation</div></body></html>"
+        result = gm.FetchResult(gm.DEFAULT_TRANSCRIPT_URL, gm.DEFAULT_TRANSCRIPT_URL, 200, html)
+
+        with self.assertRaisesRegex(gm.MonitorError, "Could not find transcript content"):
+            gm.build_monitored_text([result], "2025-2026")
+
+    def test_build_monitored_text_allows_course_evaluation_request(self) -> None:
+        html = """
+        <html><body>
+          <div>Please evaluate the course Advanced Databases before viewing the posted result.</div>
+        </body></html>
+        """
+        result = gm.FetchResult(gm.DEFAULT_TRANSCRIPT_URL, gm.DEFAULT_TRANSCRIPT_URL, 200, html)
+        monitored = gm.build_monitored_text([result], "2025-2026")
+
+        self.assertIn("Possible course evaluation request", monitored)
+        self.assertIn("Advanced Databases", monitored)
+
+    def test_fetch_transcript_falls_back_to_stable_url_when_generated_url_is_empty(self) -> None:
+        generated_url = "https://apps.guc.edu.eg/student_ext/Grade/Transcript_001.aspx?v=SMP359651"
+        requested_urls = []
+
+        def fake_request_url(url: str, cookie_header: str | None, **kwargs: object) -> gm.FetchResult:
+            requested_urls.append(url)
+            if url == generated_url:
+                return gm.FetchResult(url, url, 200, "<html><body></body></html>")
+            return gm.FetchResult(url, url, 200, SELECTED_HTML)
+
+        with mock.patch.object(gm, "request_url", side_effect=fake_request_url):
+            result = gm.fetch_transcript(generated_url, "session-cookie", "2025-2026")
+
+        self.assertEqual(result.url, gm.DEFAULT_TRANSCRIPT_URL)
+        self.assertEqual(requested_urls, [generated_url, gm.DEFAULT_TRANSCRIPT_URL])
+
+    def test_fetch_transcript_rejects_all_empty_candidates(self) -> None:
+        generated_url = "https://apps.guc.edu.eg/student_ext/Grade/Transcript_001.aspx?v=SMP359651"
+
+        with mock.patch.object(
+            gm,
+            "request_url",
+            return_value=gm.FetchResult(generated_url, generated_url, 200, "<html><body></body></html>"),
+        ):
+            with self.assertRaisesRegex(gm.MonitorError, "No transcript URL candidate"):
+                gm.fetch_transcript(generated_url, "session-cookie", "2025-2026")
 
     def test_login_page_detection(self) -> None:
         result = gm.FetchResult(

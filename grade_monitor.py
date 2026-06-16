@@ -201,23 +201,18 @@ def load_urls() -> list[str]:
         data = json.loads(urls_json)
         if not isinstance(data, list) or not all(isinstance(x, str) for x in data):
             raise MonitorError("MONITOR_URLS_JSON must be a JSON array of URL strings.")
-        return [canonicalize_transcript_url(url) for url in data]
+        return data
 
     urls_raw = env("MONITOR_URLS")
     if urls_raw:
-        return [canonicalize_transcript_url(url.strip()) for url in urls_raw.split(",") if url.strip()]
+        return [url.strip() for url in urls_raw.split(",") if url.strip()]
 
     transcript_url = env("TRANSCRIPT_URL", DEFAULT_TRANSCRIPT_URL)
-    return [canonicalize_transcript_url(transcript_url)]
+    return [transcript_url]
 
 
 def canonicalize_transcript_url(url: str) -> str:
-    """Strip GUC's generated transcript URL cache/session marker.
-
-    The portal appends values like `?v=SMP359651` when navigating to the
-    transcript page. That value changes and should not be stored in the monitor
-    configuration. The stable endpoint is the `.aspx` path itself.
-    """
+    """Remove GUC's generated transcript URL marker for hashing/display."""
     parsed = urlsplit(url)
     if not parsed.path.lower().endswith("/grade/transcript_001.aspx"):
         return url
@@ -230,6 +225,14 @@ def canonicalize_transcript_url(url: str) -> str:
         ]
     )
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, query, parsed.fragment))
+
+
+def transcript_url_candidates(url: str) -> list[str]:
+    candidates = [url]
+    canonical_url = canonicalize_transcript_url(url)
+    if canonical_url != url:
+        candidates.append(canonical_url)
+    return candidates
 
 
 def ntlm_credentials() -> tuple[str, str] | None:
@@ -410,7 +413,7 @@ def select_transcript_year(result: FetchResult, cookie_header: str | None, targe
     )
 
 
-def fetch_transcript(url: str, cookie_header: str | None, target_year: str) -> FetchResult:
+def fetch_transcript_once(url: str, cookie_header: str | None, target_year: str) -> FetchResult:
     initial = request_url(url, cookie_header)
     initial_text = html_to_visible_text(initial.text)
     if looks_like_login_page(initial, initial_text):
@@ -425,6 +428,29 @@ def fetch_transcript(url: str, cookie_header: str | None, target_year: str) -> F
             f"{url} loaded a login page after selecting {target_year}. Refresh the stored session cookie."
         )
     return selected
+
+
+def fetch_transcript(url: str, cookie_header: str | None, target_year: str) -> FetchResult:
+    errors: list[str] = []
+
+    for candidate in transcript_url_candidates(url):
+        try:
+            result = fetch_transcript_once(candidate, cookie_header, target_year)
+            build_monitored_text([result], target_year)
+            if candidate != url:
+                print(
+                    "Generated transcript URL did not contain monitorable content; "
+                    "using the stable transcript endpoint instead."
+                )
+            return result
+        except AuthError as exc:
+            errors.append(f"{canonicalize_transcript_url(candidate)}: auth failed: {exc}")
+        except MonitorError as exc:
+            errors.append(f"{canonicalize_transcript_url(candidate)}: {exc}")
+
+    if errors and all(": auth failed:" in error for error in errors):
+        raise AuthError("No transcript URL candidate authenticated successfully. " + " | ".join(errors))
+    raise MonitorError("No transcript URL candidate contained monitorable transcript content. " + " | ".join(errors))
 
 
 def html_to_visible_text(html: str) -> str:
@@ -517,36 +543,72 @@ def extract_keyword_neighborhood(lines: list[str], keywords: Iterable[str], radi
     return [lines[idx] for idx in sorted(selected_indexes)]
 
 
+def extract_course_evaluation_request(lines: list[str]) -> list[str]:
+    section = extract_keyword_neighborhood(lines, EVALUATION_KEYWORDS)
+    if not section:
+        return []
+
+    section_text = " ".join(section).lower()
+    if not any(marker in section_text for marker in ("course", "subject", "module")):
+        return []
+    return section
+
+
+def build_monitored_chunk(result: FetchResult, target_year: str) -> list[str]:
+    visible = html_to_visible_text(result.text)
+    if looks_like_login_page(result, visible):
+        raise AuthError(
+            f"{canonicalize_transcript_url(result.url)} loaded a login page instead of transcript content. "
+            "Refresh the stored session cookie."
+        )
+
+    lines = [line.strip() for line in visible.splitlines() if line.strip()]
+    display_url = canonicalize_transcript_url(result.url)
+    if not lines:
+        raise MonitorError(
+            f"No visible transcript text found at {display_url}. "
+            f"HTTP status: {result.status}; response length: {len(result.text)} characters."
+        )
+
+    transcript_region = extract_transcript_region(lines)
+    year_section = extract_year_section(lines, target_year)
+    evaluation_candidates = transcript_region if transcript_region else lines
+    evaluation_section = extract_course_evaluation_request(evaluation_candidates)
+
+    chunks = [f"URL: {display_url}"]
+    if transcript_region:
+        chunks.append(f"--- Selected academic year {target_year} transcript ---")
+        chunks.extend(transcript_region)
+        if evaluation_section:
+            chunks.append("--- Possible course evaluation request(s) ---")
+            chunks.extend(evaluation_section)
+        return chunks
+
+    if year_section:
+        chunks.append(f"--- Academic year {target_year} ---")
+        chunks.extend(year_section)
+        if evaluation_section:
+            chunks.append("--- Possible course evaluation request(s) ---")
+            chunks.extend(evaluation_section)
+        return chunks
+
+    if evaluation_section:
+        chunks.append("--- Possible course evaluation request(s) ---")
+        chunks.extend(evaluation_section)
+        return chunks
+
+    raise MonitorError(
+        f"Could not find transcript content for academic year {target_year} at {display_url}. "
+        f"Visible line count: {len(lines)}; response length: {len(result.text)} characters. "
+        "This usually means the page did not load the transcript body or the configured URL is wrong."
+    )
+
+
 def build_monitored_text(results: list[FetchResult], target_year: str) -> str:
     chunks: list[str] = []
 
     for result in results:
-        visible = html_to_visible_text(result.text)
-        if looks_like_login_page(result, visible):
-            raise AuthError(
-                f"{result.url} loaded a login page instead of transcript content. Refresh the stored session cookie."
-            )
-
-        lines = [line.strip() for line in visible.splitlines() if line.strip()]
-        transcript_region = extract_transcript_region(lines)
-        year_section = extract_year_section(lines, target_year)
-
-        chunks.append(f"URL: {result.url}")
-        if transcript_region:
-            chunks.append(f"--- Selected academic year {target_year} transcript ---")
-            chunks.extend(transcript_region)
-        elif year_section:
-            chunks.append(f"--- Academic year {target_year} ---")
-            chunks.extend(year_section)
-        else:
-            chunks.append(f"--- Academic year {target_year} not found; monitoring full visible page text ---")
-            chunks.extend(lines)
-
-        evaluation_candidates = transcript_region if transcript_region else lines
-        evaluation_section = extract_keyword_neighborhood(evaluation_candidates, EVALUATION_KEYWORDS)
-        if evaluation_section:
-            chunks.append("--- Possible course evaluation request(s) ---")
-            chunks.extend(evaluation_section)
+        chunks.extend(build_monitored_chunk(result, target_year))
 
     return "\n".join(chunks).strip()
 
@@ -678,7 +740,7 @@ def run(force: bool) -> int:
     state = {
         "signature": current_signature,
         "target_year": target_year,
-        "urls": urls,
+        "urls": [canonicalize_transcript_url(url) for url in urls],
         "last_change_at": now.isoformat(),
     }
 

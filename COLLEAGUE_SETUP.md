@@ -21,7 +21,6 @@ Add:
 | --- | --- | --- |
 | `EMAIL_TO` | `student@gmail.com` | No, defaults to `SMTP_USERNAME` |
 | `TARGET_YEAR` | `2025-2026` | No, defaults to `2025-2026` |
-| `TRANSCRIPT_URL` | `https://apps.guc.edu.eg/student_ext/Grade/Transcript_001.aspx` | No |
 | `CHECK_START` | `09:00` | No |
 | `CHECK_END` | `17:30` | No |
 | `SKIP_DAYS` | `friday` | No |
@@ -33,7 +32,13 @@ EMAIL_TO=your.email@gmail.com
 TARGET_YEAR=2025-2026
 ```
 
-If your browser shows a URL like `Transcript_001.aspx?v=SMP359651`, ignore the generated `v` part. The monitor strips it automatically and uses the stable transcript endpoint.
+The monitor defaults to:
+
+```text
+https://apps.guc.edu.eg/student_ext/Grade/Transcript_001.aspx
+```
+
+If the manual snapshot test says no transcript body was found, copy the full browser transcript URL, including any `?v=...` suffix, and save it as a `TRANSCRIPT_URL` repository secret. The monitor will use it for fetching but will not store that generated suffix in the state hash.
 
 ## GitHub Secrets
 
@@ -49,6 +54,7 @@ Add:
 | `GUC_PASSWORD` | your GUC password |
 | `SMTP_USERNAME` | your Gmail address |
 | `SMTP_PASSWORD` | your Gmail app password, not your Gmail password |
+| `TRANSCRIPT_URL` | optional full browser transcript URL, only if the default URL fails |
 
 If `GUC\your.username` fails, try just `your.username`.
 
