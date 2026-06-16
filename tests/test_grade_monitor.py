@@ -101,6 +101,23 @@ class GradeMonitorTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {}, clear=True):
             self.assertEqual(gm.load_urls(), [gm.DEFAULT_TRANSCRIPT_URL])
 
+    def test_transcript_url_strips_generated_v_parameter(self) -> None:
+        generated_url = "https://apps.guc.edu.eg/student_ext/Grade/Transcript_001.aspx?v=SMP359651"
+        self.assertEqual(gm.canonicalize_transcript_url(generated_url), gm.DEFAULT_TRANSCRIPT_URL)
+
+    def test_load_urls_strips_generated_v_parameter(self) -> None:
+        generated_url = "https://apps.guc.edu.eg/student_ext/Grade/Transcript_001.aspx?v=SMP359651"
+        with mock.patch.dict(os.environ, {"TRANSCRIPT_URL": generated_url}, clear=True):
+            self.assertEqual(gm.load_urls(), [gm.DEFAULT_TRANSCRIPT_URL])
+
+    def test_transcript_url_keeps_non_v_query_parameters(self) -> None:
+        url = "https://apps.guc.edu.eg/student_ext/Grade/Transcript_001.aspx?x=1&v=SMP359651"
+        self.assertEqual(gm.canonicalize_transcript_url(url), f"{gm.DEFAULT_TRANSCRIPT_URL}?x=1")
+
+    def test_non_transcript_url_is_not_changed(self) -> None:
+        url = "https://apps.guc.edu.eg/student_ext/Other.aspx?v=SMP359651"
+        self.assertEqual(gm.canonicalize_transcript_url(url), url)
+
     def test_workflow_commit_step_handles_new_state_file(self) -> None:
         workflow = Path(".github/workflows/check-grades.yml").read_text(encoding="utf-8")
         add_index = workflow.index("git add state/last_seen.json")

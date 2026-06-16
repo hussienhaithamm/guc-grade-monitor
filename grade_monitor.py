@@ -23,7 +23,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Iterable
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
@@ -201,14 +201,35 @@ def load_urls() -> list[str]:
         data = json.loads(urls_json)
         if not isinstance(data, list) or not all(isinstance(x, str) for x in data):
             raise MonitorError("MONITOR_URLS_JSON must be a JSON array of URL strings.")
-        return data
+        return [canonicalize_transcript_url(url) for url in data]
 
     urls_raw = env("MONITOR_URLS")
     if urls_raw:
-        return [url.strip() for url in urls_raw.split(",") if url.strip()]
+        return [canonicalize_transcript_url(url.strip()) for url in urls_raw.split(",") if url.strip()]
 
     transcript_url = env("TRANSCRIPT_URL", DEFAULT_TRANSCRIPT_URL)
-    return [transcript_url]
+    return [canonicalize_transcript_url(transcript_url)]
+
+
+def canonicalize_transcript_url(url: str) -> str:
+    """Strip GUC's generated transcript URL cache/session marker.
+
+    The portal appends values like `?v=SMP359651` when navigating to the
+    transcript page. That value changes and should not be stored in the monitor
+    configuration. The stable endpoint is the `.aspx` path itself.
+    """
+    parsed = urlsplit(url)
+    if not parsed.path.lower().endswith("/grade/transcript_001.aspx"):
+        return url
+
+    query = urlencode(
+        [
+            (key, value)
+            for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+            if key.lower() != "v"
+        ]
+    )
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, query, parsed.fragment))
 
 
 def ntlm_credentials() -> tuple[str, str] | None:

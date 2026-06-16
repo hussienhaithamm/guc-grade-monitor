@@ -33,6 +33,8 @@ EMAIL_TO=your.email@gmail.com
 TARGET_YEAR=2025-2026
 ```
 
+If your browser shows a URL like `Transcript_001.aspx?v=SMP359651`, ignore the generated `v` part. The monitor strips it automatically and uses the stable transcript endpoint.
+
 ## GitHub Secrets
 
 Open:
