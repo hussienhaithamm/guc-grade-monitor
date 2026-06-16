@@ -650,6 +650,17 @@ def extract_javascript_cookie_names(script_text: str) -> list[str]:
     return [value.split("=", 1)[0] for value in cookie_values if "=" in value]
 
 
+def redacted_snippet(text: str, *, limit: int = 220) -> str:
+    compact = re.sub(r"\s+", " ", text).strip()
+    compact = re.sub(r"""document\.cookie\s*=\s*(['"])(.*?)\1""", "document.cookie=<redacted>", compact, flags=re.I)
+    compact = re.sub(r"""(['"])[A-Za-z0-9+/=_-]{24,}\1""", r"\1<redacted>\1", compact)
+    if not compact:
+        return "none"
+    if len(compact) > limit:
+        return f"{compact[:limit]}..."
+    return compact
+
+
 def page_diagnostics(result: FetchResult, visible_line_count: int) -> str:
     parser = PageDiagnosticsParser()
     parser.feed(result.text)
@@ -683,6 +694,7 @@ def page_diagnostics(result: FetchResult, visible_line_count: int) -> str:
         f"unpacked_aspx_refs={limited_join(unpacked_aspx_refs)}; "
         f"unpacked_location_refs={limited_join(unpacked_location_refs)}; "
         f"unpacked_cookie_names={limited_join(unpacked_cookie_names)}; "
+        f"unpacked_snippet={redacted_snippet(unpacked_text)}; "
         f"anchors={limited_join(parser.anchors)}"
     )
 
