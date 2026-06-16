@@ -584,17 +584,77 @@ def limited_join(values: Iterable[str], *, limit: int = 5) -> str:
     return ", ".join(clipped) + suffix
 
 
+def js_string_unescape(value: str) -> str:
+    return bytes(value, "utf-8").decode("unicode_escape")
+
+
+def unpack_packed_javascript(script_text: str) -> list[str]:
+    unpacked: list[str] = []
+    pattern = re.compile(
+        r"eval\(function\(p,a,c,k,e,[rd]\).*?\}\('(?P<payload>(?:\\'|[^'])*)',"
+        r"(?P<base>\d+),(?P<count>\d+),'(?P<symbols>(?:\\'|[^'])*)'\.split\('\|'\)",
+        re.S,
+    )
+
+    for match in pattern.finditer(script_text):
+        payload = js_string_unescape(match.group("payload"))
+        base = int(match.group("base"))
+        count = int(match.group("count"))
+        symbols = js_string_unescape(match.group("symbols")).split("|")
+        if len(symbols) < count:
+            symbols.extend([""] * (count - len(symbols)))
+
+        replacements = {
+            encode_base_number(index, base): symbol
+            for index, symbol in enumerate(symbols[:count])
+            if symbol
+        }
+
+        def replace_word(word_match: re.Match[str]) -> str:
+            word = word_match.group(0)
+            return replacements.get(word, word)
+
+        unpacked.append(re.sub(r"\b\w+\b", replace_word, payload))
+
+    return unpacked
+
+
+def encode_base_number(value: int, base: int) -> str:
+    digits = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    if value == 0:
+        return "0"
+    result = []
+    while value:
+        value, remainder = divmod(value, base)
+        result.append(digits[remainder])
+    return "".join(reversed(result))
+
+
+def extract_javascript_locations(script_text: str) -> list[str]:
+    return re.findall(
+        r"""(?:location(?:\.href)?|document\.location|window\.open)\s*(?:=|\()\s*['"]([^'"]+)['"]""",
+        script_text,
+        re.I,
+    )
+
+
+def extract_javascript_cookie_names(script_text: str) -> list[str]:
+    cookie_values = re.findall(r"""document\.cookie\s*=\s*['"]([^'"]+)['"]""", script_text, re.I)
+    return [value.split("=", 1)[0] for value in cookie_values if "=" in value]
+
+
 def page_diagnostics(result: FetchResult, visible_line_count: int) -> str:
     parser = PageDiagnosticsParser()
     parser.feed(result.text)
 
     script_text = "\n".join(parser.inline_script_parts)
     inline_aspx_refs = re.findall(r"""['"]([^'"]+\.aspx(?:\?[^'"]*)?)['"]""", script_text, re.I)
-    location_refs = re.findall(
-        r"""(?:location(?:\.href)?|window\.open)\s*(?:=|\()\s*['"]([^'"]+)['"]""",
-        script_text,
-        re.I,
-    )
+    location_refs = extract_javascript_locations(script_text)
+    unpacked_scripts = unpack_packed_javascript(script_text)
+    unpacked_text = "\n".join(unpacked_scripts)
+    unpacked_aspx_refs = re.findall(r"""['"]([^'"]+\.aspx(?:\?[^'"]*)?)['"]""", unpacked_text, re.I)
+    unpacked_location_refs = extract_javascript_locations(unpacked_text)
+    unpacked_cookie_names = extract_javascript_cookie_names(unpacked_text)
     null_chars = result.text.count("\x00")
     whitespace_chars = sum(1 for char in result.text if char.isspace())
     control_chars = sum(1 for char in result.text if ord(char) < 32 and not char.isspace())
@@ -612,6 +672,10 @@ def page_diagnostics(result: FetchResult, visible_line_count: int) -> str:
         f"script_src={limited_join(parser.script_sources)}; "
         f"inline_aspx_refs={limited_join(inline_aspx_refs)}; "
         f"location_refs={limited_join(location_refs)}; "
+        f"unpacked_scripts={len(unpacked_scripts)}; "
+        f"unpacked_aspx_refs={limited_join(unpacked_aspx_refs)}; "
+        f"unpacked_location_refs={limited_join(unpacked_location_refs)}; "
+        f"unpacked_cookie_names={limited_join(unpacked_cookie_names)}; "
         f"anchors={limited_join(parser.anchors)}"
     )
 

@@ -84,6 +84,19 @@ class GradeMonitorTests(unittest.TestCase):
         html = "<html><body>Transcript</body></html>"
         self.assertEqual(gm.decode_response_body(html.encode("utf-16le")), html)
 
+    def test_unpack_packed_javascript_extracts_cookie_and_location(self) -> None:
+        script = (
+            "eval(function(p,a,c,k,e,d){}"
+            "('0.1=\"2=3\";4.5=\"6.aspx\"',7,7,"
+            "'document|cookie|abc|xyz|location|href|next'.split('|'),0,{}))"
+        )
+
+        unpacked = "\n".join(gm.unpack_packed_javascript(script))
+
+        self.assertIn('document.cookie="abc=xyz"', unpacked)
+        self.assertEqual(gm.extract_javascript_cookie_names(unpacked), ["abc"])
+        self.assertEqual(gm.extract_javascript_locations(unpacked), ["next.aspx"])
+
     def test_check_window_and_friday_skip(self) -> None:
         with mock.patch.dict(os.environ, {"CHECK_START": "09:00", "CHECK_END": "17:30", "SKIP_DAYS": "friday"}, clear=True):
             cairo = ZoneInfo("Africa/Cairo")
