@@ -98,7 +98,16 @@ class GradeMonitorTests(unittest.TestCase):
         self.assertEqual(gm.extract_javascript_locations(unpacked), ["next.aspx"])
 
     def test_extract_transcript_v_arguments(self) -> None:
-        self.assertEqual(gm.extract_transcript_v_arguments("sTo('SMP359651')"), ["SMP359651"])
+        self.assertEqual(gm.extract_transcript_v_arguments("sTo('SMP359651');sTo(c)"), ["SMP359651"])
+
+    def test_transcript_redirect_challenge_urls(self) -> None:
+        html = "<script>function sTo(c){};sTo('UQN278578')</script>"
+        result = gm.FetchResult(gm.DEFAULT_TRANSCRIPT_URL, gm.DEFAULT_TRANSCRIPT_URL, 200, html)
+
+        self.assertEqual(
+            gm.transcript_redirect_challenge_urls(result),
+            ["https://apps.guc.edu.eg/student_ext/Grade/Transcript_001.aspx?v=UQN278578"],
+        )
 
     def test_check_window_and_friday_skip(self) -> None:
         with mock.patch.dict(os.environ, {"CHECK_START": "09:00", "CHECK_END": "17:30", "SKIP_DAYS": "friday"}, clear=True):
@@ -133,6 +142,13 @@ class GradeMonitorTests(unittest.TestCase):
     def test_generated_url_candidates_try_given_url_then_stable_url(self) -> None:
         generated_url = "https://apps.guc.edu.eg/student_ext/Grade/Transcript_001.aspx?v=SMP359651"
         self.assertEqual(gm.transcript_url_candidates(generated_url), [generated_url, gm.DEFAULT_TRANSCRIPT_URL])
+
+    def test_transcript_url_with_generated_v_replaces_existing_v(self) -> None:
+        generated_url = "https://apps.guc.edu.eg/student_ext/Grade/Transcript_001.aspx?v=OLD123456"
+        self.assertEqual(
+            gm.transcript_url_with_generated_v(generated_url, "UQN278578"),
+            "https://apps.guc.edu.eg/student_ext/Grade/Transcript_001.aspx?v=UQN278578",
+        )
 
     def test_transcript_url_keeps_non_v_query_parameters(self) -> None:
         url = "https://apps.guc.edu.eg/student_ext/Grade/Transcript_001.aspx?x=1&v=SMP359651"
@@ -223,6 +239,23 @@ class GradeMonitorTests(unittest.TestCase):
 
         self.assertEqual(result.url, gm.DEFAULT_TRANSCRIPT_URL)
         self.assertEqual(requested_urls, [generated_url, gm.DEFAULT_TRANSCRIPT_URL])
+
+    def test_fetch_transcript_follows_generated_url_challenge(self) -> None:
+        challenge_html = "<script>function sTo(c){};sTo('UQN278578')</script>"
+        generated_url = "https://apps.guc.edu.eg/student_ext/Grade/Transcript_001.aspx?v=UQN278578"
+        requested_urls = []
+
+        def fake_request_url(url: str, cookie_header: str | None, **kwargs: object) -> gm.FetchResult:
+            requested_urls.append(url)
+            if url == gm.DEFAULT_TRANSCRIPT_URL:
+                return gm.FetchResult(url, url, 200, challenge_html)
+            return gm.FetchResult(url, url, 200, SELECTED_HTML)
+
+        with mock.patch.object(gm, "request_url", side_effect=fake_request_url):
+            result = gm.fetch_transcript(gm.DEFAULT_TRANSCRIPT_URL, "session-cookie", "2025-2026")
+
+        self.assertEqual(result.url, generated_url)
+        self.assertEqual(requested_urls, [gm.DEFAULT_TRANSCRIPT_URL, generated_url])
 
     def test_fetch_transcript_rejects_all_empty_candidates(self) -> None:
         generated_url = "https://apps.guc.edu.eg/student_ext/Grade/Transcript_001.aspx?v=SMP359651"

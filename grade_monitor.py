@@ -339,6 +339,17 @@ def canonicalize_transcript_url(url: str) -> str:
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, query, parsed.fragment))
 
 
+def transcript_url_with_generated_v(url: str, generated_v: str) -> str:
+    parsed = urlsplit(canonicalize_transcript_url(url))
+    query_items = [
+        (key, value)
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        if key.lower() != "v"
+    ]
+    query_items.append(("v", generated_v))
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query_items), parsed.fragment))
+
+
 def transcript_url_candidates(url: str) -> list[str]:
     candidates = [url]
     canonical_url = canonicalize_transcript_url(url)
@@ -531,6 +542,7 @@ def fetch_transcript_once(url: str, cookie_header: str | None, target_year: str)
         raise AuthError(
             f"{url} loaded a login page instead of transcript content. Refresh the stored session cookie."
         )
+    initial = follow_transcript_redirect_challenge(initial, cookie_header)
 
     selected = select_transcript_year(initial, cookie_header, target_year)
     selected_text = html_to_visible_text(selected.text)
@@ -538,6 +550,7 @@ def fetch_transcript_once(url: str, cookie_header: str | None, target_year: str)
         raise AuthError(
             f"{url} loaded a login page after selecting {target_year}. Refresh the stored session cookie."
         )
+    selected = follow_transcript_redirect_challenge(selected, cookie_header)
     return selected
 
 
@@ -651,7 +664,48 @@ def extract_javascript_cookie_names(script_text: str) -> list[str]:
 
 
 def extract_transcript_v_arguments(script_text: str) -> list[str]:
-    return re.findall(r"""\bsTo\s*\(\s*['"]?([A-Za-z0-9_-]+)['"]?\s*\)""", script_text)
+    arguments = re.findall(r"""\bsTo\s*\(\s*['"]?([A-Za-z0-9_-]+)['"]?\s*\)""", script_text)
+    return [
+        argument
+        for argument in arguments
+        if len(argument) >= 6 and any(char.isdigit() for char in argument)
+    ]
+
+
+def script_texts_from_html(html: str) -> str:
+    parser = PageDiagnosticsParser()
+    parser.feed(html)
+    script_text = "\n".join(parser.inline_script_parts)
+    unpacked_text = "\n".join(unpack_packed_javascript(script_text))
+    return f"{script_text}\n{unpacked_text}"
+
+
+def transcript_redirect_challenge_urls(result: FetchResult) -> list[str]:
+    script_text = script_texts_from_html(result.text)
+    urls = []
+    for generated_v in extract_transcript_v_arguments(script_text):
+        challenge_url = transcript_url_with_generated_v(result.final_url, generated_v)
+        if challenge_url not in urls:
+            urls.append(challenge_url)
+    return urls
+
+
+def follow_transcript_redirect_challenge(result: FetchResult, cookie_header: str | None) -> FetchResult:
+    visible = html_to_visible_text(result.text)
+    if visible.strip():
+        return result
+
+    for challenge_url in transcript_redirect_challenge_urls(result):
+        print("Following GUC transcript generated URL challenge.")
+        challenged = request_url(challenge_url, cookie_header, referer=result.final_url)
+        challenged_text = html_to_visible_text(challenged.text)
+        if looks_like_login_page(challenged, challenged_text):
+            raise AuthError(
+                f"{canonicalize_transcript_url(challenge_url)} loaded a login page after the generated URL challenge."
+            )
+        return challenged
+
+    return result
 
 
 def redacted_snippet(text: str, *, limit: int = 220) -> str:
