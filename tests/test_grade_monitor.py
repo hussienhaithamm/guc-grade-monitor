@@ -97,6 +97,9 @@ class GradeMonitorTests(unittest.TestCase):
         self.assertEqual(gm.extract_javascript_cookie_names(unpacked), ["abc"])
         self.assertEqual(gm.extract_javascript_locations(unpacked), ["next.aspx"])
 
+    def test_extract_transcript_v_arguments(self) -> None:
+        self.assertEqual(gm.extract_transcript_v_arguments("sTo('SMP359651')"), ["SMP359651"])
+
     def test_check_window_and_friday_skip(self) -> None:
         with mock.patch.dict(os.environ, {"CHECK_START": "09:00", "CHECK_END": "17:30", "SKIP_DAYS": "friday"}, clear=True):
             cairo = ZoneInfo("Africa/Cairo")

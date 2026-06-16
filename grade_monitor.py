@@ -650,6 +650,10 @@ def extract_javascript_cookie_names(script_text: str) -> list[str]:
     return [value.split("=", 1)[0] for value in cookie_values if "=" in value]
 
 
+def extract_transcript_v_arguments(script_text: str) -> list[str]:
+    return re.findall(r"""\bsTo\s*\(\s*['"]?([A-Za-z0-9_-]+)['"]?\s*\)""", script_text)
+
+
 def redacted_snippet(text: str, *, limit: int = 220) -> str:
     compact = re.sub(r"\s+", " ", text).strip()
     compact = re.sub(r"""document\.cookie\s*=\s*(['"])(.*?)\1""", "document.cookie=<redacted>", compact, flags=re.I)
@@ -673,6 +677,7 @@ def page_diagnostics(result: FetchResult, visible_line_count: int) -> str:
     unpacked_aspx_refs = re.findall(r"""['"]([^'"]+\.aspx(?:\?[^'"]*)?)['"]""", unpacked_text, re.I)
     unpacked_location_refs = extract_javascript_locations(unpacked_text)
     unpacked_cookie_names = extract_javascript_cookie_names(unpacked_text)
+    transcript_v_args = extract_transcript_v_arguments(f"{script_text}\n{unpacked_text}")
     null_chars = result.text.count("\x00")
     whitespace_chars = sum(1 for char in result.text if char.isspace())
     control_chars = sum(1 for char in result.text if ord(char) < 32 and not char.isspace())
@@ -695,6 +700,8 @@ def page_diagnostics(result: FetchResult, visible_line_count: int) -> str:
         f"unpacked_location_refs={limited_join(unpacked_location_refs)}; "
         f"unpacked_cookie_names={limited_join(unpacked_cookie_names)}; "
         f"unpacked_snippet={redacted_snippet(unpacked_text)}; "
+        f"transcript_v_args={limited_join(transcript_v_args)}; "
+        f"raw_script_snippet={redacted_snippet(script_text)}; "
         f"anchors={limited_join(parser.anchors)}"
     )
 
