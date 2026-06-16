@@ -147,6 +147,70 @@ class FormParser(HTMLParser):
             self._option_text.append(data)
 
 
+class PageDiagnosticsParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.title_parts: list[str] = []
+        self.forms: list[str] = []
+        self.inputs: list[str] = []
+        self.selects: list[str] = []
+        self.anchors: list[str] = []
+        self.meta_refreshes: list[str] = []
+        self.script_sources: list[str] = []
+        self.inline_script_parts: list[str] = []
+        self._in_title = False
+        self._in_script = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attr = {name.lower(): value or "" for name, value in attrs}
+        tag = tag.lower()
+
+        if tag == "title":
+            self._in_title = True
+            return
+
+        if tag == "form":
+            self.forms.append(attr.get("action", ""))
+            return
+
+        if tag == "input":
+            self.inputs.append(attr.get("name", "") or attr.get("id", "") or attr.get("type", ""))
+            return
+
+        if tag == "select":
+            self.selects.append(attr.get("name", "") or attr.get("id", ""))
+            return
+
+        if tag == "a":
+            href = attr.get("href")
+            if href:
+                self.anchors.append(href)
+            return
+
+        if tag == "meta" and attr.get("http-equiv", "").lower() == "refresh":
+            self.meta_refreshes.append(attr.get("content", ""))
+            return
+
+        if tag == "script":
+            src = attr.get("src")
+            if src:
+                self.script_sources.append(src)
+            self._in_script = True
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if tag == "title":
+            self._in_title = False
+        elif tag == "script":
+            self._in_script = False
+
+    def handle_data(self, data: str) -> None:
+        if self._in_title:
+            self.title_parts.append(data)
+        elif self._in_script:
+            self.inline_script_parts.append(data)
+
+
 @dataclass(frozen=True)
 class FetchResult:
     url: str
@@ -471,6 +535,41 @@ def looks_like_login_page(result: FetchResult, visible_text: str) -> bool:
     )
 
 
+def limited_join(values: Iterable[str], *, limit: int = 5) -> str:
+    cleaned = [value.strip() for value in values if value and value.strip()]
+    if not cleaned:
+        return "none"
+    clipped = cleaned[:limit]
+    suffix = "" if len(cleaned) <= limit else f", ... +{len(cleaned) - limit} more"
+    return ", ".join(clipped) + suffix
+
+
+def page_diagnostics(result: FetchResult, visible_line_count: int) -> str:
+    parser = PageDiagnosticsParser()
+    parser.feed(result.text)
+
+    script_text = "\n".join(parser.inline_script_parts)
+    inline_aspx_refs = re.findall(r"""['"]([^'"]+\.aspx(?:\?[^'"]*)?)['"]""", script_text, re.I)
+    location_refs = re.findall(
+        r"""(?:location(?:\.href)?|window\.open)\s*(?:=|\()\s*['"]([^'"]+)['"]""",
+        script_text,
+        re.I,
+    )
+
+    return (
+        f"final_url={canonicalize_transcript_url(result.final_url)}; "
+        f"status={result.status}; response_length={len(result.text)}; "
+        f"visible_lines={visible_line_count}; "
+        f"title={limited_join([''.join(parser.title_parts)])}; "
+        f"forms={len(parser.forms)}; inputs={len(parser.inputs)}; selects={limited_join(parser.selects)}; "
+        f"meta_refresh={limited_join(parser.meta_refreshes)}; "
+        f"script_src={limited_join(parser.script_sources)}; "
+        f"inline_aspx_refs={limited_join(inline_aspx_refs)}; "
+        f"location_refs={limited_join(location_refs)}; "
+        f"anchors={limited_join(parser.anchors)}"
+    )
+
+
 def extract_year_section(lines: list[str], target_year: str) -> list[str]:
     year_re = re.compile(r"\b20\d{2}\s*[/-]\s*20\d{2}\b")
     normalized_target = normalize_year(target_year)
@@ -567,7 +666,7 @@ def build_monitored_chunk(result: FetchResult, target_year: str) -> list[str]:
     if not lines:
         raise MonitorError(
             f"No visible transcript text found at {display_url}. "
-            f"HTTP status: {result.status}; response length: {len(result.text)} characters."
+            f"Diagnostics: {page_diagnostics(result, 0)}."
         )
 
     transcript_region = extract_transcript_region(lines)
@@ -599,8 +698,8 @@ def build_monitored_chunk(result: FetchResult, target_year: str) -> list[str]:
 
     raise MonitorError(
         f"Could not find transcript content for academic year {target_year} at {display_url}. "
-        f"Visible line count: {len(lines)}; response length: {len(result.text)} characters. "
-        "This usually means the page did not load the transcript body or the configured URL is wrong."
+        "This usually means the page did not load the transcript body or the configured URL is wrong. "
+        f"Diagnostics: {page_diagnostics(result, len(lines))}."
     )
 
 
