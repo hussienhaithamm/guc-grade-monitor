@@ -38,7 +38,7 @@ The monitor defaults to:
 https://apps.guc.edu.eg/student_ext/Grade/Transcript_001.aspx
 ```
 
-If the manual snapshot test says no transcript body was found, copy the full browser transcript URL, including any `?v=...` suffix, and save it as a `TRANSCRIPT_URL` repository secret. The monitor will use it for fetching but will not store that generated suffix in the state hash.
+If your browser shows a URL with `?v=...`, do not copy it. The monitor reads GUC's current generated code automatically during each run and does not store it in the state hash.
 
 ## GitHub Secrets
 
@@ -54,7 +54,6 @@ Add:
 | `GUC_PASSWORD` | your GUC password |
 | `SMTP_USERNAME` | your Gmail address |
 | `SMTP_PASSWORD` | your Gmail app password, not your Gmail password |
-| `TRANSCRIPT_URL` | optional full browser transcript URL, only if the default URL fails |
 
 If `GUC\your.username` fails, try just `your.username`.
 
