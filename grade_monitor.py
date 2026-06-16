@@ -1,0 +1,734 @@
+#!/usr/bin/env python3
+"""
+Monitor a GUC transcript page for newly posted grades.
+
+The script intentionally stores only a SHA-256 signature in state/last_seen.json.
+It does not persist transcript contents or cookies.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import smtplib
+import ssl
+import sys
+from dataclasses import dataclass
+from datetime import datetime, timezone, time
+from email.message import EmailMessage
+from html.parser import HTMLParser
+from pathlib import Path
+from typing import Iterable
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
+from zoneinfo import ZoneInfo
+
+
+DEFAULT_TRANSCRIPT_URL = "https://apps.guc.edu.eg/student_ext/Grade/Transcript_001.aspx"
+DEFAULT_TARGET_YEAR = "2025-2026"
+DEFAULT_TIMEZONE = "Africa/Cairo"
+DEFAULT_CHECK_START = "09:00"
+DEFAULT_CHECK_END = "17:30"
+DEFAULT_STATE_FILE = "state/last_seen.json"
+MAX_EMAIL_BODY_CHARS = 12000
+
+_NTLM_SESSION = None
+
+EVALUATION_KEYWORDS = (
+    "evaluate",
+    "evaluation",
+    "questionnaire",
+    "survey",
+    "feedback",
+)
+
+
+class MonitorError(Exception):
+    pass
+
+
+class AuthError(MonitorError):
+    pass
+
+
+class VisibleTextParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._skip_depth = 0
+        self.parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() in {"script", "style", "noscript", "svg"}:
+            self._skip_depth += 1
+        if tag.lower() in {"br", "p", "div", "tr", "td", "th", "li", "option", "h1", "h2", "h3"}:
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() in {"script", "style", "noscript", "svg"} and self._skip_depth:
+            self._skip_depth -= 1
+        if tag.lower() in {"p", "div", "tr", "li", "table", "section"}:
+            self.parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if self._skip_depth:
+            return
+        if data and data.strip():
+            self.parts.append(data)
+
+    def text(self) -> str:
+        raw = "".join(self.parts)
+        lines = []
+        for line in raw.splitlines():
+            clean = re.sub(r"\s+", " ", line).strip()
+            if clean:
+                lines.append(clean)
+        return "\n".join(lines)
+
+
+class FormParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.fields: dict[str, str] = {}
+        self.selects: list[dict[str, object]] = []
+        self._current_select: dict[str, object] | None = None
+        self._current_option: dict[str, str] | None = None
+        self._option_text: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attr = {name.lower(): value or "" for name, value in attrs}
+        tag = tag.lower()
+
+        if tag == "input":
+            name = attr.get("name")
+            if name:
+                self.fields[name] = attr.get("value", "")
+            return
+
+        if tag == "select":
+            name = attr.get("name")
+            if not name:
+                return
+            self._current_select = {
+                "name": name,
+                "id": attr.get("id", ""),
+                "options": [],
+            }
+            return
+
+        if tag == "option" and self._current_select is not None:
+            self._current_option = {
+                "value": attr.get("value", ""),
+                "selected": "selected" in attr,
+            }
+            self._option_text = []
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if tag == "option" and self._current_select is not None and self._current_option is not None:
+            option = dict(self._current_option)
+            option["text"] = re.sub(r"\s+", " ", "".join(self._option_text)).strip()
+            self._current_select["options"].append(option)
+            if option.get("selected"):
+                self.fields[str(self._current_select["name"])] = option.get("value", "")
+            self._current_option = None
+            self._option_text = []
+            return
+
+        if tag == "select" and self._current_select is not None:
+            self.selects.append(self._current_select)
+            self._current_select = None
+
+    def handle_data(self, data: str) -> None:
+        if self._current_option is not None:
+            self._option_text.append(data)
+
+
+@dataclass(frozen=True)
+class FetchResult:
+    url: str
+    final_url: str
+    status: int
+    text: str
+
+
+def normalize_year(value: str) -> str:
+    return re.sub(r"\D+", "", value)
+
+
+def env(name: str, default: str | None = None) -> str | None:
+    value = os.getenv(name)
+    if value is None or value == "":
+        return default
+    return value
+
+
+def parse_bool(value: str | None, default: bool = False) -> bool:
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def parse_hhmm(value: str) -> time:
+    hour, minute = value.split(":", 1)
+    return time(int(hour), int(minute))
+
+
+def within_check_window(now: datetime) -> bool:
+    if parse_bool(env("FORCE_CHECK"), False):
+        return True
+
+    skip_days = {
+        day.strip().lower()
+        for day in env("SKIP_DAYS", "friday").split(",")
+        if day.strip()
+    }
+    if now.strftime("%A").lower() in skip_days:
+        return False
+
+    start = parse_hhmm(env("CHECK_START", DEFAULT_CHECK_START))
+    end = parse_hhmm(env("CHECK_END", DEFAULT_CHECK_END))
+    current = now.time().replace(second=0, microsecond=0)
+    return start <= current <= end
+
+
+def load_urls() -> list[str]:
+    urls_json = env("MONITOR_URLS_JSON")
+    if urls_json:
+        data = json.loads(urls_json)
+        if not isinstance(data, list) or not all(isinstance(x, str) for x in data):
+            raise MonitorError("MONITOR_URLS_JSON must be a JSON array of URL strings.")
+        return data
+
+    urls_raw = env("MONITOR_URLS")
+    if urls_raw:
+        return [url.strip() for url in urls_raw.split(",") if url.strip()]
+
+    transcript_url = env("TRANSCRIPT_URL", DEFAULT_TRANSCRIPT_URL)
+    return [transcript_url]
+
+
+def ntlm_credentials() -> tuple[str, str] | None:
+    username = env("GUC_USERNAME")
+    password = env("GUC_PASSWORD")
+    if username and password:
+        return username, password
+    return None
+
+
+def ensure_auth_configured(cookie_header: str | None) -> None:
+    if ntlm_credentials() or cookie_header:
+        return
+    raise MonitorError(
+        "Authentication is not configured. Set GUC_USERNAME and GUC_PASSWORD "
+        "as GitHub secrets, or set SESSION_COOKIE as a fallback."
+    )
+
+
+def request_url(
+    url: str,
+    cookie_header: str | None,
+    *,
+    method: str = "GET",
+    data: dict[str, str] | None = None,
+    referer: str | None = None,
+) -> FetchResult:
+    credentials = ntlm_credentials()
+    if credentials:
+        return request_url_with_ntlm(
+            url,
+            credentials,
+            method=method,
+            data=data,
+            referer=referer,
+        )
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 grade-monitor/1.0",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+    if cookie_header:
+        headers["Cookie"] = cookie_header
+    if referer:
+        headers["Referer"] = referer
+
+    body = None
+    if data is not None:
+        body = urlencode(data).encode("utf-8")
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
+
+    req = Request(url, data=body, headers=headers, method=method)
+    try:
+        with urlopen(req, timeout=30) as response:
+            content_type = response.headers.get("Content-Type", "")
+            match = re.search(r"charset=([^;\s]+)", content_type, re.I)
+            charset = match.group(1) if match else "utf-8"
+            body = response.read().decode(charset, errors="replace")
+            return FetchResult(
+                url=url,
+                final_url=response.geturl(),
+                status=response.status,
+                text=body,
+            )
+    except HTTPError as exc:
+        if exc.code in {401, 403}:
+            raise AuthError(
+                f"{url} returned HTTP {exc.code}. The university session cookie is missing, expired, or not accepted."
+            ) from exc
+        raise MonitorError(f"{url} returned HTTP {exc.code}.") from exc
+    except URLError as exc:
+        raise MonitorError(f"Could not reach {url}: {exc.reason}") from exc
+
+
+def request_url_with_ntlm(
+    url: str,
+    credentials: tuple[str, str],
+    *,
+    method: str = "GET",
+    data: dict[str, str] | None = None,
+    referer: str | None = None,
+) -> FetchResult:
+    global _NTLM_SESSION
+
+    try:
+        import requests
+        from requests_ntlm import HttpNtlmAuth
+    except ImportError as exc:
+        raise MonitorError(
+            "NTLM login requires dependencies. Run `pip install -r requirements.txt`."
+        ) from exc
+
+    if _NTLM_SESSION is None:
+        username, password = credentials
+        session = requests.Session()
+        session.auth = HttpNtlmAuth(username, password)
+        _NTLM_SESSION = session
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 grade-monitor/1.0",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+    if referer:
+        headers["Referer"] = referer
+
+    try:
+        response = _NTLM_SESSION.request(
+            method,
+            url,
+            data=data,
+            headers=headers,
+            timeout=30,
+            allow_redirects=True,
+        )
+    except requests.RequestException as exc:
+        raise MonitorError(f"Could not reach {url}: {exc}") from exc
+
+    if response.status_code in {401, 403}:
+        raise AuthError(
+            f"{url} returned HTTP {response.status_code}. Check GUC_USERNAME/GUC_PASSWORD "
+            "or try including the Windows domain, for example GUC\\username."
+        )
+    if response.status_code >= 400:
+        raise MonitorError(f"{url} returned HTTP {response.status_code}.")
+
+    response.encoding = response.encoding or "utf-8"
+    return FetchResult(
+        url=url,
+        final_url=response.url,
+        status=response.status_code,
+        text=response.text,
+    )
+
+
+def parse_form(html: str) -> FormParser:
+    parser = FormParser()
+    parser.feed(html)
+    return parser
+
+
+def find_study_year_selection(html: str, target_year: str) -> tuple[str, str] | None:
+    form = parse_form(html)
+    target = normalize_year(target_year)
+
+    for select in form.selects:
+        name = str(select["name"])
+        options = select.get("options", [])
+        if not isinstance(options, list):
+            continue
+        for option in options:
+            if not isinstance(option, dict):
+                continue
+            option_text = str(option.get("text", ""))
+            if normalize_year(option_text) == target:
+                return name, str(option.get("value", ""))
+    return None
+
+
+def select_transcript_year(result: FetchResult, cookie_header: str | None, target_year: str) -> FetchResult:
+    selection = find_study_year_selection(result.text, target_year)
+    if selection is None:
+        return result
+
+    select_name, selected_value = selection
+    form = parse_form(result.text)
+    fields = dict(form.fields)
+    fields[select_name] = selected_value
+    fields["__EVENTTARGET"] = select_name
+    fields.setdefault("__EVENTARGUMENT", "")
+    fields.setdefault("__LASTFOCUS", "")
+
+    return request_url(
+        result.final_url,
+        cookie_header,
+        method="POST",
+        data=fields,
+        referer=result.final_url,
+    )
+
+
+def fetch_transcript(url: str, cookie_header: str | None, target_year: str) -> FetchResult:
+    initial = request_url(url, cookie_header)
+    initial_text = html_to_visible_text(initial.text)
+    if looks_like_login_page(initial, initial_text):
+        raise AuthError(
+            f"{url} loaded a login page instead of transcript content. Refresh the stored session cookie."
+        )
+
+    selected = select_transcript_year(initial, cookie_header, target_year)
+    selected_text = html_to_visible_text(selected.text)
+    if looks_like_login_page(selected, selected_text):
+        raise AuthError(
+            f"{url} loaded a login page after selecting {target_year}. Refresh the stored session cookie."
+        )
+    return selected
+
+
+def html_to_visible_text(html: str) -> str:
+    parser = VisibleTextParser()
+    parser.feed(html)
+    return parser.text()
+
+
+def looks_like_login_page(result: FetchResult, visible_text: str) -> bool:
+    lower_url = result.final_url.lower()
+    lower_html = result.text.lower()
+    lower_text = visible_text.lower()
+    return (
+        "login" in lower_url
+        or "type=\"password\"" in lower_html
+        or "type='password'" in lower_html
+        or ("username" in lower_text and "password" in lower_text)
+    )
+
+
+def extract_year_section(lines: list[str], target_year: str) -> list[str]:
+    year_re = re.compile(r"\b20\d{2}\s*[/-]\s*20\d{2}\b")
+    normalized_target = normalize_year(target_year)
+
+    start = None
+    for idx, line in enumerate(lines):
+        if normalize_year(line).find(normalized_target) != -1:
+            start = idx
+            break
+
+    if start is None:
+        return []
+
+    end = len(lines)
+    for idx in range(start + 1, len(lines)):
+        if year_re.search(lines[idx]):
+            end = idx
+            break
+    return lines[start:end]
+
+
+def extract_transcript_region(lines: list[str]) -> list[str]:
+    info_idx = None
+    for idx, line in enumerate(lines):
+        if line_is_info_marker(line):
+            info_idx = idx
+            break
+
+    transcript_indexes = [
+        idx
+        for idx, line in enumerate(lines)
+        if line.rstrip(":").lower() == "transcript"
+    ]
+    if not transcript_indexes:
+        return []
+
+    if info_idx is not None:
+        transcript_idx = next((idx for idx in transcript_indexes if idx > info_idx), None)
+        start = info_idx
+    else:
+        transcript_idx = transcript_indexes[0]
+        start = transcript_idx
+
+    if transcript_idx is None:
+        return []
+
+    end = len(lines)
+    for idx in range(transcript_idx + 1, len(lines)):
+        if lines[idx].lower().replace(" ", "") == "shortcuts":
+            end = idx
+            break
+
+    return lines[start:end]
+
+
+def line_is_info_marker(line: str) -> bool:
+    return line.rstrip(":").lower() in {"your info", "student info", "student information"}
+
+
+def extract_keyword_neighborhood(lines: list[str], keywords: Iterable[str], radius: int = 2) -> list[str]:
+    lowered_keywords = tuple(keyword.lower() for keyword in keywords)
+    selected_indexes: set[int] = set()
+    for idx, line in enumerate(lines):
+        lowered = line.lower()
+        if any(keyword in lowered for keyword in lowered_keywords):
+            for offset in range(-radius, radius + 1):
+                neighbor = idx + offset
+                if 0 <= neighbor < len(lines):
+                    selected_indexes.add(neighbor)
+    return [lines[idx] for idx in sorted(selected_indexes)]
+
+
+def build_monitored_text(results: list[FetchResult], target_year: str) -> str:
+    chunks: list[str] = []
+
+    for result in results:
+        visible = html_to_visible_text(result.text)
+        if looks_like_login_page(result, visible):
+            raise AuthError(
+                f"{result.url} loaded a login page instead of transcript content. Refresh the stored session cookie."
+            )
+
+        lines = [line.strip() for line in visible.splitlines() if line.strip()]
+        transcript_region = extract_transcript_region(lines)
+        year_section = extract_year_section(lines, target_year)
+
+        chunks.append(f"URL: {result.url}")
+        if transcript_region:
+            chunks.append(f"--- Selected academic year {target_year} transcript ---")
+            chunks.extend(transcript_region)
+        elif year_section:
+            chunks.append(f"--- Academic year {target_year} ---")
+            chunks.extend(year_section)
+        else:
+            chunks.append(f"--- Academic year {target_year} not found; monitoring full visible page text ---")
+            chunks.extend(lines)
+
+        evaluation_candidates = transcript_region if transcript_region else lines
+        evaluation_section = extract_keyword_neighborhood(evaluation_candidates, EVALUATION_KEYWORDS)
+        if evaluation_section:
+            chunks.append("--- Possible course evaluation request(s) ---")
+            chunks.extend(evaluation_section)
+
+    return "\n".join(chunks).strip()
+
+
+def signature(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def load_state(path: Path) -> dict[str, object]:
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise MonitorError(f"State file is not valid JSON: {path}") from exc
+    if not isinstance(data, dict):
+        raise MonitorError(f"State file must contain a JSON object: {path}")
+    return data
+
+
+def save_state(path: Path, data: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f"{path.name}.tmp")
+    tmp_path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(tmp_path, path)
+
+
+def email_excerpt(text: str) -> str:
+    if len(text) <= MAX_EMAIL_BODY_CHARS:
+        return text
+    omitted = len(text) - MAX_EMAIL_BODY_CHARS
+    return f"{text[:MAX_EMAIL_BODY_CHARS]}\n\n[truncated {omitted} characters]"
+
+
+def send_email(subject: str, body: str) -> None:
+    smtp_host = env("SMTP_HOST", "smtp.gmail.com")
+    smtp_port = int(env("SMTP_PORT", "465"))
+    smtp_username = env("SMTP_USERNAME")
+    smtp_password = env("SMTP_PASSWORD")
+    from_email = env("EMAIL_FROM", smtp_username)
+    to_email = env("EMAIL_TO", smtp_username)
+
+    if not smtp_username or not smtp_password or not from_email or not to_email:
+        raise MonitorError(
+            "Email is not configured. Set SMTP_USERNAME and SMTP_PASSWORD secrets, "
+            "and set EMAIL_TO if the notification address differs from SMTP_USERNAME."
+        )
+
+    message = EmailMessage()
+    message["Subject"] = subject
+    message["From"] = from_email
+    message["To"] = to_email
+    message.set_content(body)
+
+    context = ssl.create_default_context()
+    try:
+        with smtplib.SMTP_SSL(smtp_host, smtp_port, context=context) as smtp:
+            smtp.login(smtp_username, smtp_password)
+            smtp.send_message(message)
+    except (OSError, smtplib.SMTPException) as exc:
+        raise MonitorError(f"Could not send email through {smtp_host}:{smtp_port}: {exc}") from exc
+
+
+def smtp_is_configured() -> bool:
+    return bool(env("SMTP_USERNAME") and env("SMTP_PASSWORD"))
+
+
+def send_self_test_email() -> int:
+    now = datetime.now(timezone.utc).isoformat()
+    send_email(
+        subject="GUC grade monitor self-test",
+        body=(
+            "This is a manual self-test from the GUC grade monitor.\n\n"
+            f"Sent at: {now}\n\n"
+            "If you received this from GitHub Actions, the cloud email path is working. "
+            "Run the workflow again with send_current=true to test GUC login plus transcript fetching."
+        ),
+    )
+    print("Self-test email sent.")
+    return 0
+
+
+def notify_failure(error_type: str, exc: Exception) -> None:
+    if not parse_bool(env("NOTIFY_ON_FAILURE"), True) or not smtp_is_configured():
+        return
+
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        send_email(
+            subject=f"GUC grade monitor failed: {error_type}",
+            body=(
+                "The GUC grade monitor failed instead of completing a check.\n\n"
+                f"Failure type: {error_type}\n"
+                f"Time: {now}\n"
+                f"Error: {exc}\n\n"
+                "This alert means the monitor may not notify you about newly posted grades "
+                "until the issue is fixed. Check the GitHub Actions run logs."
+            ),
+        )
+    except Exception as notify_exc:
+        print(f"WARNING: failed to send failure notification: {notify_exc}", file=sys.stderr)
+
+
+def run(force: bool) -> int:
+    timezone = ZoneInfo(env("TIMEZONE", DEFAULT_TIMEZONE))
+    now = datetime.now(timezone)
+
+    if force:
+        os.environ["FORCE_CHECK"] = "true"
+
+    if not within_check_window(now):
+        print(f"Outside check window at {now.isoformat()}; skipping without fetching.")
+        return 0
+
+    urls = load_urls()
+    cookie = env("SESSION_COOKIE") or env("COOKIE_HEADER") or env("GUC_COOKIE")
+    ensure_auth_configured(cookie)
+    state_path = Path(env("STATE_FILE", DEFAULT_STATE_FILE))
+    target_year = env("TARGET_YEAR", DEFAULT_TARGET_YEAR)
+    allow_first_email = parse_bool(env("ALLOW_FIRST_EMAIL"), False)
+
+    results = [fetch_transcript(url, cookie, target_year) for url in urls]
+    monitored_text = build_monitored_text(results, target_year)
+    current_signature = signature(monitored_text)
+    previous_state = load_state(state_path)
+    previous_signature = previous_state.get("signature")
+    send_current = parse_bool(env("SEND_CURRENT_TRANSCRIPT"), False)
+
+    state = {
+        "signature": current_signature,
+        "target_year": target_year,
+        "urls": urls,
+        "last_change_at": now.isoformat(),
+    }
+
+    if send_current:
+        send_email(
+            subject=f"GUC transcript snapshot - {target_year}",
+            body=(
+                f"Transcript snapshot generated at {now.isoformat()}.\n\n"
+                f"Target academic year: {target_year}\n\n"
+                "Current monitored transcript/evaluation text:\n\n"
+                f"{email_excerpt(monitored_text)}"
+            ),
+        )
+        save_state(state_path, state)
+        print("Current transcript snapshot emailed and state updated.")
+        return 0
+
+    if not previous_signature:
+        if allow_first_email:
+            send_email(
+                subject="GUC transcript monitor baseline created",
+                body=(
+                    f"Baseline created at {now.isoformat()}.\n\n"
+                    "Current monitored transcript/evaluation text:\n\n"
+                    f"{email_excerpt(monitored_text)}"
+                ),
+            )
+            print("Baseline created and email sent.")
+        else:
+            print("Baseline created. No email sent on first run.")
+        save_state(state_path, state)
+        return 0
+
+    if previous_signature == current_signature:
+        print("No transcript/evaluation change detected.")
+        return 0
+
+    send_email(
+        subject="GUC transcript update detected",
+        body=(
+            f"A transcript or course-evaluation change was detected at {now.isoformat()}.\n\n"
+            f"Target academic year: {target_year}\n\n"
+            "Current monitored text:\n\n"
+            f"{email_excerpt(monitored_text)}\n\n"
+            "Open the student portal to confirm the official grade."
+        ),
+    )
+    save_state(state_path, state)
+    print("Change detected. Email sent and state updated.")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--force", action="store_true", help="ignore the Cairo check window")
+    parser.add_argument("--self-test-email", action="store_true", help="send a test email and exit")
+    args = parser.parse_args()
+
+    try:
+        if args.self_test_email or parse_bool(env("SELF_TEST_EMAIL"), False):
+            return send_self_test_email()
+        return run(force=args.force)
+    except AuthError as exc:
+        print(f"AUTH ERROR: {exc}", file=sys.stderr)
+        notify_failure("auth", exc)
+        return 2
+    except MonitorError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        notify_failure("monitor", exc)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

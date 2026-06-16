@@ -1,0 +1,160 @@
+# GUC Grade Monitor
+
+Free hosted monitor for a GUC transcript page.
+
+What it does:
+
+- checks the transcript page every 10 minutes during the Cairo working-day window
+- skips Fridays
+- selects the configured `TARGET_YEAR` in the transcript page's `Study Year` dropdown
+- watches the loaded transcript tables and possible course-evaluation text
+- sends an email to the configured `EMAIL_TO` address when the watched text changes
+- stores only a SHA-256 hash in `state/last_seen.json`, not transcript contents
+
+For the shortest setup guide, send colleagues [COLLEAGUE_SETUP.md](./COLLEAGUE_SETUP.md).
+
+## Why authentication is needed
+
+The transcript URL returns `401 Unauthorized` from a clean environment and advertises `Negotiate`/`NTLM` authentication. That means GUC is using Windows Integrated Authentication, not a normal HTML login form.
+
+The cloud monitor authenticates with your own GUC username/password through NTLM. Credentials must be stored only in GitHub Actions secrets. Do not commit them and do not paste them into chat.
+
+The old `SESSION_COOKIE` secret is still supported as a fallback, but `GUC_USERNAME`/`GUC_PASSWORD` is the intended cloud-side setup.
+
+## Free hosting path
+
+Use a private GitHub repository and GitHub Actions. This has no cost for this small scheduled job under GitHub's free allowance.
+
+1. Create a private GitHub repo.
+2. Put these files at the repo root.
+3. In the repo, open `Settings` -> `Secrets and variables` -> `Actions`.
+4. Add the Variables and Secrets below.
+
+Variables are not sensitive:
+
+| Variable | Value |
+| --- | --- |
+| `EMAIL_TO` | Notification address. Optional if it is the same as `SMTP_USERNAME` |
+| `TARGET_YEAR` | Study year, for example `2025-2026` |
+| `TRANSCRIPT_URL` | Optional. Defaults to `https://apps.guc.edu.eg/student_ext/Grade/Transcript_001.aspx` |
+| `CHECK_START` | Optional. Defaults to `09:00` |
+| `CHECK_END` | Optional. Defaults to `17:30` |
+| `SKIP_DAYS` | Optional. Defaults to `friday` |
+
+Secrets are sensitive:
+
+| Secret | Value |
+| --- | --- |
+| `GUC_USERNAME` | Your GUC Windows username. If plain username fails, use the domain form, for example `GUC\your.username` |
+| `GUC_PASSWORD` | Your GUC password |
+| `SMTP_USERNAME` | Your Gmail address |
+| `SMTP_PASSWORD` | A Gmail app password, not your normal Gmail password |
+
+Optional fallback secret:
+
+| Secret | Value |
+| --- | --- |
+| `SESSION_COOKIE` | The Cookie request header copied from your logged-in browser, only if NTLM credentials do not work |
+
+## Username format
+
+The portal identifies users like `GUC\username`. Use that exact domain form for `GUC_USERNAME` if the first run returns `401`.
+
+Examples:
+
+```text
+GUC\your.username
+your.username
+```
+
+Start with the form you normally use to log in. If that fails, try the domain-prefixed form.
+
+## Gmail app password
+
+Gmail SMTP does not accept your normal Gmail password. Create a free app password in your Google Account security settings:
+
+1. Enable 2-Step Verification if it is not already enabled.
+2. Open Google Account -> Security -> App passwords.
+3. Create an app password for Mail.
+4. Save that 16-character password as `SMTP_PASSWORD`.
+
+## Schedule
+
+The workflow polls every 10 minutes between `05:00` and `15:50` UTC. The script then applies Cairo-local rules:
+
+- check only between `09:00` and `17:30` Cairo time
+- skip Friday
+
+This avoids daylight-saving/timezone drift because Python uses `Africa/Cairo`.
+
+You can manually test from GitHub:
+
+1. Go to `Actions`.
+2. Open `Check GUC grades`.
+3. Click `Run workflow`.
+4. First set `self_test_email` to `true`. This skips GUC and sends a simple test email through GitHub Actions.
+5. Run it again with `self_test_email=false`, `force=true`, and `send_current=true`. This logs into GUC, fetches the transcript, and emails today's current snapshot.
+6. After the snapshot arrives, future scheduled runs should use `send_current=false` automatically and email only when the watched transcript text changes.
+
+The first successful run creates the baseline and does not email you unless you set `ALLOW_FIRST_EMAIL=true`.
+
+The monitor performs the same important page step we traced manually: it loads the transcript page, posts the ASP.NET form with `Study Year = 2025-2026`, then hashes the visible transcript content region.
+
+The workflow also runs the automated unit tests before each scheduled check.
+
+The monitor is configured to fail loudly. If auth, GUC access, parsing, or state handling fails during a scheduled check and SMTP is configured, it sends a `GUC grade monitor failed` email instead of failing silently.
+
+There is also a final GitHub Actions fallback alert. If the workflow itself fails before the monitor can run, for example during dependency installation or tests, it sends `GUC grade monitor workflow failed`.
+
+## Local dry run
+
+From the repo root:
+
+```bash
+export TRANSCRIPT_URL="https://apps.guc.edu.eg/student_ext/Grade/Transcript_001.aspx?..."
+export GUC_USERNAME='GUC\your.username'
+export GUC_PASSWORD='your-guc-password'
+export EMAIL_TO="student@gmail.com"
+export TARGET_YEAR="2025-2026"
+export SMTP_USERNAME="student@gmail.com"
+export SMTP_PASSWORD="your-gmail-app-password"
+python -m pip install -r requirements.txt
+SEND_CURRENT_TRANSCRIPT=true python grade_monitor.py --force
+```
+
+## Local validation
+
+Run these before pushing changes:
+
+```bash
+python -m pip install -r requirements.txt
+python -m py_compile grade_monitor.py tests/test_grade_monitor.py
+python -m unittest discover -s tests -v
+```
+
+The tests cover:
+
+- working-hour and Friday skip logic
+- ASP.NET study-year form parsing and postback fields
+- transcript-region extraction
+- login-page detection
+- state-file read/write and invalid-state handling
+- baseline/no-change/change notification behavior
+- manual `SEND_CURRENT_TRANSCRIPT=true` snapshot behavior
+- manual self-test email behavior
+- failure-alert email behavior
+- missing-auth handling
+
+## If it breaks
+
+- `AUTH ERROR`: the credentials are wrong, the username needs the `GUC\` domain prefix, or GUC blocks GitHub's cloud IPs.
+- `Academic year 2025-2026 not found`: the page structure differs from the assumption; the script falls back to visible page text, but we should tune the extractor.
+- No email on the first successful run is expected; that run only creates the baseline.
+- If the university adds CAPTCHA or MFA, this monitor should stop and require a different authorized flow. Do not bypass CAPTCHA or MFA.
+
+The cloud path is only fully proven after a real GitHub Actions run with valid secrets. Local tests prove the monitor logic and failure handling, but they cannot prove that GUC accepts GitHub-hosted runner IPs or that your saved secrets are correct.
+
+Do not rely on the monitor until both manual GitHub tests pass:
+
+1. `self_test_email=true` email arrives.
+2. `send_current=true` transcript snapshot email arrives.

@@ -1,0 +1,125 @@
+name: Check GUC grades
+
+on:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Run even outside the Cairo check window"
+        required: false
+        default: "true"
+      send_current:
+        description: "Email the current transcript snapshot even if nothing changed"
+        required: false
+        default: "true"
+      self_test_email:
+        description: "Only send a test email; skip GUC login/transcript fetching"
+        required: false
+        default: "false"
+  schedule:
+    # GitHub cron is UTC. The script itself checks Africa/Cairo time and skips Friday.
+    # Poll every 10 minutes across the broad Cairo working-day window.
+    - cron: "*/10 5-15 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: guc-grade-monitor
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Run tests
+        run: python -m unittest discover -s tests
+
+      - name: Check transcript
+        env:
+          TRANSCRIPT_URL: ${{ vars.TRANSCRIPT_URL }}
+          GUC_USERNAME: ${{ secrets.GUC_USERNAME }}
+          GUC_PASSWORD: ${{ secrets.GUC_PASSWORD }}
+          SESSION_COOKIE: ${{ secrets.SESSION_COOKIE }}
+          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          EMAIL_TO: ${{ vars.EMAIL_TO }}
+          TARGET_YEAR: ${{ vars.TARGET_YEAR || '2025-2026' }}
+          TIMEZONE: ${{ vars.TIMEZONE || 'Africa/Cairo' }}
+          CHECK_START: ${{ vars.CHECK_START || '09:00' }}
+          CHECK_END: ${{ vars.CHECK_END || '17:30' }}
+          SKIP_DAYS: ${{ vars.SKIP_DAYS || 'friday' }}
+          FORCE_CHECK: ${{ github.event.inputs.force || 'false' }}
+          SEND_CURRENT_TRANSCRIPT: ${{ github.event.inputs.send_current || 'false' }}
+          SELF_TEST_EMAIL: ${{ github.event.inputs.self_test_email || 'false' }}
+          NOTIFY_ON_FAILURE: "true"
+        run: python grade_monitor.py
+
+      - name: Commit monitor state
+        run: |
+          if [ ! -f state/last_seen.json ]; then
+            echo "No state file to commit."
+            exit 0
+          fi
+          git add state/last_seen.json
+          if git diff --cached --quiet -- state/last_seen.json; then
+            echo "No state changes to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Update grade monitor state"
+          git push
+
+      - name: Notify workflow failure
+        if: failure()
+        env:
+          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          EMAIL_TO: ${{ vars.EMAIL_TO }}
+          GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python - <<'PY'
+          import os
+          import smtplib
+          import ssl
+          from email.message import EmailMessage
+
+          username = os.environ.get("SMTP_USERNAME")
+          password = os.environ.get("SMTP_PASSWORD")
+          to_email = os.environ.get("EMAIL_TO") or username
+          run_url = os.environ.get("GITHUB_RUN_URL", "")
+
+          if not username or not password:
+              print("SMTP secrets missing; cannot send workflow failure email.")
+              raise SystemExit(0)
+
+          message = EmailMessage()
+          message["Subject"] = "GUC grade monitor workflow failed"
+          message["From"] = username
+          message["To"] = to_email
+          message.set_content(
+              "The GitHub Actions job for the GUC grade monitor failed.\n\n"
+              f"Run URL: {run_url}\n\n"
+              "Check the run logs. If this happened during transcript checking, "
+              "you may also receive a more specific failure email from the monitor script."
+          )
+
+          with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=ssl.create_default_context()) as smtp:
+              smtp.login(username, password)
+              smtp.send_message(message)
+          PY

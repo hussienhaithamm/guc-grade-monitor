@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.DS_Store
+
+# Never commit copied browser cookies or local env files.
+.env
+cookies.txt
