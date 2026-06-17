@@ -866,6 +866,11 @@ def build_monitored_chunk(result: FetchResult, target_year: str) -> list[str]:
 
     chunks = [f"URL: {display_url}"]
     if transcript_region:
+        if normalize_year(" ".join(transcript_region)).find(normalize_year(target_year)) == -1:
+            raise MonitorError(
+                f"Transcript content was found at {display_url}, but it does not mention "
+                f"the configured academic year {target_year}. This prevents monitoring the wrong study year."
+            )
         chunks.append(f"--- Selected academic year {target_year} transcript ---")
         chunks.extend(transcript_region)
         if evaluation_section:

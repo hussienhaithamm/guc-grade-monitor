@@ -131,7 +131,6 @@ There is also a final GitHub Actions fallback alert. If the workflow itself fail
 From the repo root:
 
 ```bash
-export TRANSCRIPT_URL="https://apps.guc.edu.eg/student_ext/Grade/Transcript_001.aspx?..."
 export GUC_USERNAME='GUC\your.username'
 export GUC_PASSWORD='your-guc-password'
 export EMAIL_TO="student@gmail.com"
@@ -158,6 +157,7 @@ The tests cover:
 - ASP.NET study-year form parsing and postback fields
 - generated transcript URL handling without hash churn
 - transcript-region extraction
+- wrong-year transcript rejection
 - rejection of empty or unrelated pages
 - login-page detection
 - state-file read/write and invalid-state handling
@@ -170,7 +170,7 @@ The tests cover:
 ## If it breaks
 
 - `AUTH ERROR`: the credentials are wrong, the username needs the `GUC\` domain prefix, or GUC blocks GitHub's cloud IPs.
-- `No visible transcript text found` or `Could not find transcript content`: GitHub Actions reached a page, but it was not the actual transcript body. Set `TRANSCRIPT_URL` to the full browser transcript URL as a secret, or refresh that secret if the generated URL expired.
+- `No visible transcript text found`, `Could not find transcript content`, or `does not mention the configured academic year`: GitHub Actions reached a page, but it was not the expected transcript body for `TARGET_YEAR`. Keep the failure email and GitHub Actions logs so the extractor can be adjusted against the actual page shape.
 - No email on the first successful run is expected; that run only creates the baseline.
 - If the university adds CAPTCHA or MFA, this monitor should stop and require a different authorized flow. Do not bypass CAPTCHA or MFA.
 

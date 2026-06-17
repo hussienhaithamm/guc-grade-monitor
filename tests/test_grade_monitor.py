@@ -192,6 +192,13 @@ class GradeMonitorTests(unittest.TestCase):
         self.assertNotIn("Choose Season", monitored)
         self.assertNotIn("ShortCuts", monitored)
 
+    def test_build_monitored_text_rejects_wrong_year_transcript_region(self) -> None:
+        wrong_year_html = SELECTED_HTML.replace("Year:</strong> 2025-2026", "Year:</strong> 2024-2025")
+        result = gm.FetchResult(TRANSCRIPT_URL, TRANSCRIPT_URL, 200, wrong_year_html)
+
+        with self.assertRaisesRegex(gm.MonitorError, "does not mention the configured academic year"):
+            gm.build_monitored_text([result], "2025-2026")
+
     def test_build_monitored_text_uses_stable_url_for_generated_url(self) -> None:
         result = gm.FetchResult(TRANSCRIPT_URL, TRANSCRIPT_URL, 200, SELECTED_HTML)
         monitored = gm.build_monitored_text([result], "2025-2026")
