@@ -8,6 +8,7 @@ What it does:
 - skips Fridays
 - selects the configured `TARGET_YEAR` in the transcript page's `Study Year` dropdown
 - watches the loaded transcript tables and possible course-evaluation text
+- ignores volatile printed/generated date footers that would otherwise cause daily false positives
 - sends an email to the configured `EMAIL_TO` address when the watched text changes
 - stores only a SHA-256 hash in `state/last_seen.json`, not transcript contents
 
@@ -158,6 +159,7 @@ The tests cover:
 - generated transcript URL handling without hash churn
 - transcript-region extraction
 - wrong-year transcript rejection
+- volatile footer date normalization
 - rejection of empty or unrelated pages
 - login-page detection
 - state-file read/write and invalid-state handling

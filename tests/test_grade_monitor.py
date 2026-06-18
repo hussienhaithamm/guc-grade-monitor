@@ -192,6 +192,23 @@ class GradeMonitorTests(unittest.TestCase):
         self.assertNotIn("Choose Season", monitored)
         self.assertNotIn("ShortCuts", monitored)
 
+    def test_build_monitored_text_removes_volatile_footer_dates(self) -> None:
+        dated_html = SELECTED_HTML.replace("<h3>ShortCuts</h3>", "<div>6/18/2026</div><h3>ShortCuts</h3>")
+        result = gm.FetchResult(TRANSCRIPT_URL, TRANSCRIPT_URL, 200, dated_html)
+        monitored = gm.build_monitored_text([result], "2025-2026")
+
+        self.assertNotIn("6/18/2026", monitored)
+        self.assertEqual(
+            gm.signature(monitored),
+            gm.signature(gm.build_monitored_text([gm.FetchResult(TRANSCRIPT_URL, TRANSCRIPT_URL, 200, SELECTED_HTML)], "2025-2026")),
+        )
+
+    def test_volatile_signature_line_detection(self) -> None:
+        self.assertTrue(gm.line_is_volatile_for_signature("6/18/2026"))
+        self.assertTrue(gm.line_is_volatile_for_signature("Printed on: 2026-06-18"))
+        self.assertFalse(gm.line_is_volatile_for_signature("Spring 2026"))
+        self.assertFalse(gm.line_is_volatile_for_signature("Artificial Intelligence"))
+
     def test_build_monitored_text_rejects_wrong_year_transcript_region(self) -> None:
         wrong_year_html = SELECTED_HTML.replace("Year:</strong> 2025-2026", "Year:</strong> 2024-2025")
         result = gm.FetchResult(TRANSCRIPT_URL, TRANSCRIPT_URL, 200, wrong_year_html)
@@ -335,7 +352,7 @@ class GradeMonitorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             state_file = Path(tmp) / "state.json"
             monitored = gm.build_monitored_text([gm.FetchResult(TRANSCRIPT_URL, TRANSCRIPT_URL, 200, SELECTED_HTML)], "2025-2026")
-            gm.save_state(state_file, {"signature": gm.signature(monitored)})
+            gm.save_state(state_file, {"signature": gm.signature(monitored), "monitor_state_version": gm.MONITOR_STATE_VERSION})
             env = {
                 "TRANSCRIPT_URL": TRANSCRIPT_URL,
                 "SESSION_COOKIE": "cookie",
@@ -348,11 +365,33 @@ class GradeMonitorTests(unittest.TestCase):
                 self.assertEqual(run_monitor_silently(), 0)
                 send_email.assert_not_called()
 
+    def test_run_migrates_old_state_version_without_email(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_file = Path(tmp) / "state.json"
+            gm.save_state(state_file, {"signature": "old-format-signature"})
+            env = {
+                "TRANSCRIPT_URL": TRANSCRIPT_URL,
+                "SESSION_COOKIE": "cookie",
+                "STATE_FILE": str(state_file),
+                "FORCE_CHECK": "true",
+                "SMTP_USERNAME": "sender@example.test",
+                "SMTP_PASSWORD": "app-password",
+            }
+            with mock.patch.dict(os.environ, env, clear=True), \
+                 mock.patch.object(gm, "fetch_transcript", return_value=gm.FetchResult(TRANSCRIPT_URL, TRANSCRIPT_URL, 200, SELECTED_HTML)), \
+                 mock.patch.object(gm, "send_email") as send_email:
+                self.assertEqual(run_monitor_silently(), 0)
+                send_email.assert_not_called()
+
+            saved = gm.load_state(state_file)
+            self.assertEqual(saved["monitor_state_version"], gm.MONITOR_STATE_VERSION)
+            self.assertNotEqual(saved["signature"], "old-format-signature")
+
     def test_run_change_sends_email_and_updates_state(self) -> None:
         changed_html = SELECTED_HTML.replace("B-", "A")
         with tempfile.TemporaryDirectory() as tmp:
             state_file = Path(tmp) / "state.json"
-            gm.save_state(state_file, {"signature": "old"})
+            gm.save_state(state_file, {"signature": "old", "monitor_state_version": gm.MONITOR_STATE_VERSION})
             env = {
                 "TRANSCRIPT_URL": TRANSCRIPT_URL,
                 "SESSION_COOKIE": "cookie",

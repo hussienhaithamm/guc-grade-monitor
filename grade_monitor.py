@@ -35,6 +35,7 @@ DEFAULT_CHECK_START = "09:00"
 DEFAULT_CHECK_END = "17:30"
 DEFAULT_STATE_FILE = "state/last_seen.json"
 MAX_EMAIL_BODY_CHARS = 12000
+MONITOR_STATE_VERSION = 2
 BROWSER_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -843,6 +844,27 @@ def extract_course_evaluation_request(lines: list[str]) -> list[str]:
     return section
 
 
+def line_is_volatile_for_signature(line: str) -> bool:
+    clean = re.sub(r"\s+", " ", line).strip()
+    short_date = r"\d{1,2}[/-]\d{1,2}[/-]\d{2,4}"
+    iso_date = r"\d{4}[/-]\d{1,2}[/-]\d{1,2}"
+
+    if re.fullmatch(short_date, clean) or re.fullmatch(iso_date, clean):
+        return True
+
+    return bool(
+        re.fullmatch(
+            rf"(?:print(?:ed)?|generated|date)(?:\s+on)?\s*:?\s*(?:{short_date}|{iso_date})(?:\s+\d{{1,2}}:\d{{2}}(?::\d{{2}})?)?",
+            clean,
+            re.I,
+        )
+    )
+
+
+def stable_monitored_lines(lines: list[str]) -> list[str]:
+    return [line for line in lines if not line_is_volatile_for_signature(line)]
+
+
 def build_monitored_chunk(result: FetchResult, target_year: str) -> list[str]:
     visible = html_to_visible_text(result.text)
     if looks_like_login_page(result, visible):
@@ -859,9 +881,9 @@ def build_monitored_chunk(result: FetchResult, target_year: str) -> list[str]:
             f"Diagnostics: {page_diagnostics(result, 0)}."
         )
 
-    transcript_region = extract_transcript_region(lines)
-    year_section = extract_year_section(lines, target_year)
-    evaluation_candidates = transcript_region if transcript_region else lines
+    transcript_region = stable_monitored_lines(extract_transcript_region(lines))
+    year_section = stable_monitored_lines(extract_year_section(lines, target_year))
+    evaluation_candidates = transcript_region if transcript_region else stable_monitored_lines(lines)
     evaluation_section = extract_course_evaluation_request(evaluation_candidates)
 
     chunks = [f"URL: {display_url}"]
@@ -1029,6 +1051,7 @@ def run(force: bool) -> int:
     current_signature = signature(monitored_text)
     previous_state = load_state(state_path)
     previous_signature = previous_state.get("signature")
+    previous_state_version = previous_state.get("monitor_state_version")
     send_current = parse_bool(env("SEND_CURRENT_TRANSCRIPT"), False)
 
     state = {
@@ -1036,6 +1059,7 @@ def run(force: bool) -> int:
         "target_year": target_year,
         "urls": [canonicalize_transcript_url(url) for url in urls],
         "last_change_at": now.isoformat(),
+        "monitor_state_version": MONITOR_STATE_VERSION,
     }
 
     if send_current:
@@ -1066,6 +1090,14 @@ def run(force: bool) -> int:
         else:
             print("Baseline created. No email sent on first run.")
         save_state(state_path, state)
+        return 0
+
+    if previous_state_version != MONITOR_STATE_VERSION:
+        save_state(state_path, state)
+        print(
+            f"Monitor normalization changed to version {MONITOR_STATE_VERSION}. "
+            "Baseline updated without sending an update email."
+        )
         return 0
 
     if previous_signature == current_signature:
