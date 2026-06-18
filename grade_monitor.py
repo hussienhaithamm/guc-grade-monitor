@@ -35,7 +35,7 @@ DEFAULT_CHECK_START = "09:00"
 DEFAULT_CHECK_END = "17:30"
 DEFAULT_STATE_FILE = "state/last_seen.json"
 MAX_EMAIL_BODY_CHARS = 12000
-MONITOR_STATE_VERSION = 2
+MONITOR_STATE_VERSION = 3
 BROWSER_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -56,6 +56,17 @@ EVALUATION_ACTION_KEYWORDS = (
     "questionnaire",
     "survey",
     "feedback",
+)
+EVALUATION_REQUIREMENT_MARKERS = (
+    "please",
+    "required",
+    "require",
+    "must",
+    "before",
+    "view",
+    "posted",
+    "complete",
+    "fill",
 )
 
 
@@ -699,10 +710,7 @@ def transcript_redirect_challenge_urls(result: FetchResult) -> list[str]:
 
 def visible_text_has_monitorable_body(visible: str) -> bool:
     lines = [line.strip() for line in visible.splitlines() if line.strip()]
-    return bool(
-        extract_transcript_region(lines)
-        or extract_course_evaluation_request(lines, EVALUATION_ACTION_KEYWORDS)
-    )
+    return bool(extract_transcript_region(lines) or extract_course_evaluation_request(lines))
 
 
 def follow_transcript_redirect_challenge(result: FetchResult, cookie_header: str | None) -> FetchResult:
@@ -857,6 +865,10 @@ def extract_course_evaluation_request(
 
     section_text = " ".join(section).lower()
     if not any(marker in section_text for marker in ("course", "subject", "module")):
+        return []
+    if "evaluate" in section_text:
+        return section
+    if not any(marker in section_text for marker in EVALUATION_REQUIREMENT_MARKERS):
         return []
     return section
 

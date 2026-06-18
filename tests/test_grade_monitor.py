@@ -269,6 +269,17 @@ class GradeMonitorTests(unittest.TestCase):
         self.assertIn("Possible course evaluation request", monitored)
         self.assertIn("Advanced Databases", monitored)
 
+    def test_static_evaluation_navigation_does_not_count_as_request(self) -> None:
+        html = SELECTED_HTML.replace(
+            "<h3>ShortCuts</h3>",
+            "<h3>ShortCuts</h3><div>Course Evaluation</div><div>Feedback</div>",
+        )
+        result = gm.FetchResult(gm.DEFAULT_TRANSCRIPT_URL, gm.DEFAULT_TRANSCRIPT_URL, 200, html)
+        monitored = gm.build_monitored_text([result], "2025-2026")
+
+        self.assertNotIn("Possible course evaluation request", monitored)
+        self.assertNotIn("Feedback", monitored)
+
     def test_fetch_transcript_falls_back_to_stable_url_when_generated_url_is_empty(self) -> None:
         generated_url = "https://apps.guc.edu.eg/student_ext/Grade/Transcript_001.aspx?v=SMP359651"
         requested_urls = []
