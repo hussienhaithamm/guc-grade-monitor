@@ -17,8 +17,9 @@ on:
         default: "false"
   schedule:
     # GitHub cron is UTC. The script itself checks Africa/Cairo time and skips Friday.
-    # Poll every 10 minutes across the broad Cairo working-day window.
-    - cron: "*/10 5-15 * * *"
+    # Poll every 5 minutes across the broad Cairo working-day window, Saturday-Thursday.
+    # Use off-boundary minutes to avoid the busiest exact 00/10/20/... cron slots.
+    - cron: "3,8,13,18,23,28,33,38,43,48,53,58 5-15 * * 0-4,6"
 
 permissions:
   contents: write

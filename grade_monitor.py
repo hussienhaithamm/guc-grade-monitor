@@ -51,6 +51,12 @@ EVALUATION_KEYWORDS = (
     "survey",
     "feedback",
 )
+EVALUATION_ACTION_KEYWORDS = (
+    "evaluate",
+    "questionnaire",
+    "survey",
+    "feedback",
+)
 
 
 class MonitorError(Exception):
@@ -691,9 +697,17 @@ def transcript_redirect_challenge_urls(result: FetchResult) -> list[str]:
     return urls
 
 
+def visible_text_has_monitorable_body(visible: str) -> bool:
+    lines = [line.strip() for line in visible.splitlines() if line.strip()]
+    return bool(
+        extract_transcript_region(lines)
+        or extract_course_evaluation_request(lines, EVALUATION_ACTION_KEYWORDS)
+    )
+
+
 def follow_transcript_redirect_challenge(result: FetchResult, cookie_header: str | None) -> FetchResult:
     visible = html_to_visible_text(result.text)
-    if visible.strip():
+    if visible_text_has_monitorable_body(visible):
         return result
 
     for challenge_url in transcript_redirect_challenge_urls(result):
@@ -833,8 +847,11 @@ def extract_keyword_neighborhood(lines: list[str], keywords: Iterable[str], radi
     return [lines[idx] for idx in sorted(selected_indexes)]
 
 
-def extract_course_evaluation_request(lines: list[str]) -> list[str]:
-    section = extract_keyword_neighborhood(lines, EVALUATION_KEYWORDS)
+def extract_course_evaluation_request(
+    lines: list[str],
+    keywords: Iterable[str] = EVALUATION_KEYWORDS,
+) -> list[str]:
+    section = extract_keyword_neighborhood(lines, keywords)
     if not section:
         return []
 
@@ -883,8 +900,11 @@ def build_monitored_chunk(result: FetchResult, target_year: str) -> list[str]:
 
     transcript_region = stable_monitored_lines(extract_transcript_region(lines))
     year_section = stable_monitored_lines(extract_year_section(lines, target_year))
-    evaluation_candidates = transcript_region if transcript_region else stable_monitored_lines(lines)
+    stable_lines = stable_monitored_lines(lines)
+    evaluation_candidates = transcript_region if transcript_region else stable_lines
     evaluation_section = extract_course_evaluation_request(evaluation_candidates)
+    if transcript_region and not evaluation_section:
+        evaluation_section = extract_course_evaluation_request(stable_lines, EVALUATION_ACTION_KEYWORDS)
 
     chunks = [f"URL: {display_url}"]
     if transcript_region:

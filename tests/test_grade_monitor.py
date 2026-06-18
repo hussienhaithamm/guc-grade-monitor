@@ -166,6 +166,15 @@ class GradeMonitorTests(unittest.TestCase):
         self.assertLess(add_index, diff_index)
         self.assertIn("[ ! -f state/last_seen.json ]", workflow)
 
+    def test_workflow_uses_off_boundary_five_minute_schedule(self) -> None:
+        workflow = Path(".github/workflows/check-grades.yml").read_text(encoding="utf-8")
+
+        self.assertIn(
+            'cron: "3,8,13,18,23,28,33,38,43,48,53,58 5-15 * * 0-4,6"',
+            workflow,
+        )
+        self.assertNotIn("*/10", workflow)
+
     def test_select_transcript_year_posts_aspnet_fields(self) -> None:
         result = gm.FetchResult(TRANSCRIPT_URL, TRANSCRIPT_URL, 200, INITIAL_HTML)
 
@@ -248,6 +257,18 @@ class GradeMonitorTests(unittest.TestCase):
         self.assertIn("Possible course evaluation request", monitored)
         self.assertIn("Advanced Databases", monitored)
 
+    def test_build_monitored_text_finds_evaluation_request_outside_transcript_region(self) -> None:
+        html = SELECTED_HTML.replace(
+            "<div>Your Info:</div>",
+            "<div>Please evaluate the course Advanced Databases before viewing the posted result.</div>"
+            "<div>Your Info:</div>",
+        )
+        result = gm.FetchResult(gm.DEFAULT_TRANSCRIPT_URL, gm.DEFAULT_TRANSCRIPT_URL, 200, html)
+        monitored = gm.build_monitored_text([result], "2025-2026")
+
+        self.assertIn("Possible course evaluation request", monitored)
+        self.assertIn("Advanced Databases", monitored)
+
     def test_fetch_transcript_falls_back_to_stable_url_when_generated_url_is_empty(self) -> None:
         generated_url = "https://apps.guc.edu.eg/student_ext/Grade/Transcript_001.aspx?v=SMP359651"
         requested_urls = []
@@ -266,6 +287,23 @@ class GradeMonitorTests(unittest.TestCase):
 
     def test_fetch_transcript_follows_generated_url_challenge(self) -> None:
         challenge_html = "<script>function sTo(c){};sTo('UQN278578')</script>"
+        generated_url = "https://apps.guc.edu.eg/student_ext/Grade/Transcript_001.aspx?v=UQN278578"
+        requested_urls = []
+
+        def fake_request_url(url: str, cookie_header: str | None, **kwargs: object) -> gm.FetchResult:
+            requested_urls.append(url)
+            if url == gm.DEFAULT_TRANSCRIPT_URL:
+                return gm.FetchResult(url, url, 200, challenge_html)
+            return gm.FetchResult(url, url, 200, SELECTED_HTML)
+
+        with mock.patch.object(gm, "request_url", side_effect=fake_request_url):
+            result = gm.fetch_transcript(gm.DEFAULT_TRANSCRIPT_URL, "session-cookie", "2025-2026")
+
+        self.assertEqual(result.url, generated_url)
+        self.assertEqual(requested_urls, [gm.DEFAULT_TRANSCRIPT_URL, generated_url])
+
+    def test_fetch_transcript_follows_generated_url_challenge_with_visible_redirect_text(self) -> None:
+        challenge_html = "<html><body>Please wait<script>function sTo(c){};sTo('UQN278578')</script></body></html>"
         generated_url = "https://apps.guc.edu.eg/student_ext/Grade/Transcript_001.aspx?v=UQN278578"
         requested_urls = []
 

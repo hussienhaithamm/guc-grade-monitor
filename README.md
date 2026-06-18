@@ -4,7 +4,7 @@ Free hosted monitor for a GUC transcript page.
 
 What it does:
 
-- checks the transcript page every 10 minutes during the Cairo working-day window
+- schedules transcript checks every 5 minutes during the Cairo working-day window
 - skips Fridays
 - selects the configured `TARGET_YEAR` in the transcript page's `Study Year` dropdown
 - watches the loaded transcript tables and possible course-evaluation text
@@ -24,9 +24,9 @@ The old `SESSION_COOKIE` secret is still supported as a fallback, but `GUC_USERN
 
 ## Free hosting path
 
-Use a private GitHub repository and GitHub Actions. This has no cost for this small scheduled job under GitHub's free allowance.
+Use a GitHub repository and GitHub Actions. This has no cost for this small scheduled job under GitHub's free allowance when configured within the available Actions minutes.
 
-1. Create a private GitHub repo.
+1. Create a GitHub repo. Use a private repo if you want the committed state hash hidden; a public repo is also fine as long as secrets are stored only in GitHub Actions secrets.
 2. Put these files at the repo root.
 3. In the repo, open `Settings` -> `Secrets and variables` -> `Actions`.
 4. Add the Variables and Secrets below.
@@ -101,12 +101,14 @@ Gmail SMTP does not accept your normal Gmail password. Create a free app passwor
 
 ## Schedule
 
-The workflow polls every 10 minutes between `05:00` and `15:50` UTC. The script then applies Cairo-local rules:
+The workflow is scheduled every 5 minutes on off-boundary minutes between `05:00` and `15:58` UTC, Saturday through Thursday. The script then applies Cairo-local rules:
 
 - check only between `09:00` and `17:30` Cairo time
 - skip Friday
 
 This avoids daylight-saving/timezone drift because Python uses `Africa/Cairo`.
+
+GitHub scheduled workflows are best-effort. Runs can start late or occasionally be skipped by GitHub. The monitor is configured to check frequently and away from the busiest exact clock boundaries, but it is still a scheduled cloud checker, not a true always-on real-time process.
 
 You can manually test from GitHub:
 
@@ -157,7 +159,9 @@ The tests cover:
 - working-hour and Friday skip logic
 - ASP.NET study-year form parsing and postback fields
 - generated transcript URL handling without hash churn
+- visible generated-URL redirect handling
 - transcript-region extraction
+- course-evaluation prompt detection inside or outside the transcript region
 - wrong-year transcript rejection
 - volatile footer date normalization
 - rejection of empty or unrelated pages

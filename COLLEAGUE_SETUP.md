@@ -78,8 +78,10 @@ Only rely on scheduled monitoring after both emails arrive.
 
 ## How It Runs
 
-- every 10 minutes during the Cairo working-day window
+- scheduled every 5 minutes during the Cairo working-day window, Saturday through Thursday
 - skips Friday by default
 - selects the configured `TARGET_YEAR`
 - emails only when the watched transcript/evaluation text changes
 - sends a failure email if the monitor or workflow breaks
+
+GitHub scheduled workflows are best-effort, so a run can start late or occasionally be skipped by GitHub. The monitor uses frequent off-boundary checks to reduce delay, but it is not a true always-on process.
