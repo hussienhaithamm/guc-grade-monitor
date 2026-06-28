@@ -78,6 +78,10 @@ class AuthError(MonitorError):
     pass
 
 
+class PortalUnavailableError(MonitorError):
+    pass
+
+
 class VisibleTextParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -585,6 +589,8 @@ def fetch_transcript(url: str, cookie_header: str | None, target_year: str) -> F
                     "using the stable transcript endpoint instead."
                 )
             return result
+        except PortalUnavailableError:
+            raise
         except AuthError as exc:
             errors.append(f"{canonicalize_transcript_url(candidate)}: auth failed: {exc}")
         except MonitorError as exc:
@@ -611,6 +617,22 @@ def looks_like_login_page(result: FetchResult, visible_text: str) -> bool:
         or "type='password'" in lower_html
         or ("username" in lower_text and "password" in lower_text)
     )
+
+
+def portal_unavailability_message(result: FetchResult, visible_text: str) -> str | None:
+    parsed = urlsplit(result.final_url)
+    if not parsed.path.lower().endswith("/main/messagepage.aspx"):
+        return None
+
+    messages = [
+        value
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        if key.lower() == "message"
+    ]
+    combined = re.sub(r"\s+", " ", " ".join(messages + [visible_text])).strip()
+    if re.search(r"\bpage\s+will\s+be\s+available\s+from\b", combined, re.I):
+        return messages[0] if messages else combined
+    return None
 
 
 def limited_join(values: Iterable[str], *, limit: int = 5) -> str:
@@ -901,6 +923,11 @@ def build_monitored_chunk(result: FetchResult, target_year: str) -> list[str]:
             f"{canonicalize_transcript_url(result.url)} loaded a login page instead of transcript content. "
             "Refresh the stored session cookie."
         )
+    unavailable_message = portal_unavailability_message(result, visible)
+    if unavailable_message:
+        raise PortalUnavailableError(
+            f"GUC temporarily redirected the transcript page to a message page: {unavailable_message}"
+        )
 
     lines = [line.strip() for line in visible.splitlines() if line.strip()]
     display_url = canonicalize_transcript_url(result.url)
@@ -1078,7 +1105,11 @@ def run(force: bool) -> int:
     target_year = env("TARGET_YEAR", DEFAULT_TARGET_YEAR)
     allow_first_email = parse_bool(env("ALLOW_FIRST_EMAIL"), False)
 
-    results = [fetch_transcript(url, cookie, target_year) for url in urls]
+    try:
+        results = [fetch_transcript(url, cookie, target_year) for url in urls]
+    except PortalUnavailableError as exc:
+        print(f"Portal unavailable; skipping check without changing state. {exc}")
+        return 0
     monitored_text = build_monitored_text(results, target_year)
     current_signature = signature(monitored_text)
     previous_state = load_state(state_path)
@@ -1161,6 +1192,9 @@ def main() -> int:
         if args.self_test_email or parse_bool(env("SELF_TEST_EMAIL"), False):
             return send_self_test_email()
         return run(force=args.force)
+    except PortalUnavailableError as exc:
+        print(f"Portal unavailable; skipping check without changing state. {exc}")
+        return 0
     except AuthError as exc:
         print(f"AUTH ERROR: {exc}", file=sys.stderr)
         notify_failure("auth", exc)

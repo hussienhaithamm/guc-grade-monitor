@@ -82,6 +82,7 @@ Only rely on scheduled monitoring after both emails arrive.
 - skips Friday by default
 - selects the configured `TARGET_YEAR`
 - emails only when the watched transcript/evaluation text changes
+- silently skips temporary GUC closure pages such as `Page will be available from 17:00`
 - sends a failure email if the monitor or workflow breaks
 
 GitHub scheduled workflows are best-effort, so a run can start late or occasionally be skipped by GitHub. The monitor uses frequent off-boundary checks to reduce delay, but it is not a true always-on process.

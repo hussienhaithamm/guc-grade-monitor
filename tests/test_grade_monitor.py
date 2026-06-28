@@ -15,6 +15,10 @@ import grade_monitor as gm
 
 
 TRANSCRIPT_URL = "https://apps.guc.edu.eg/student_ext/Grade/Transcript_001.aspx?v=test"
+MESSAGE_PAGE_URL = (
+    "https://apps.guc.edu.eg/student_ext/Main/MessagePage.aspx?"
+    "Message=Page%20will%20be%20available%20from%2017:00"
+)
 
 INITIAL_HTML = """
 <html>
@@ -62,6 +66,18 @@ SELECTED_HTML = """
     </table>
     <div>Current Cumulative GPA for Engineering including German Language 3.28</div>
     <h3>ShortCuts</h3>
+  </body>
+</html>
+"""
+
+MESSAGE_PAGE_HTML = """
+<html>
+  <head><title>Message System</title></head>
+  <body>
+    <form>
+      <input type="hidden" name="__VIEWSTATE" value="view-state">
+    </form>
+    <div>Page will be available from 17:00</div>
   </body>
 </html>
 """
@@ -243,6 +259,12 @@ class GradeMonitorTests(unittest.TestCase):
         result = gm.FetchResult(gm.DEFAULT_TRANSCRIPT_URL, gm.DEFAULT_TRANSCRIPT_URL, 200, html)
 
         with self.assertRaisesRegex(gm.MonitorError, "Could not find transcript content"):
+            gm.build_monitored_text([result], "2025-2026")
+
+    def test_portal_availability_message_is_not_a_monitor_failure(self) -> None:
+        result = gm.FetchResult(gm.DEFAULT_TRANSCRIPT_URL, MESSAGE_PAGE_URL, 200, MESSAGE_PAGE_HTML)
+
+        with self.assertRaisesRegex(gm.PortalUnavailableError, "available from 17:00"):
             gm.build_monitored_text([result], "2025-2026")
 
     def test_build_monitored_text_allows_course_evaluation_request(self) -> None:
@@ -458,6 +480,28 @@ class GradeMonitorTests(unittest.TestCase):
             saved = gm.load_state(state_file)
             self.assertNotEqual(saved["signature"], "old")
 
+    def test_run_skips_portal_unavailable_without_email_or_state_update(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_file = Path(tmp) / "state.json"
+            env = {
+                "TRANSCRIPT_URL": TRANSCRIPT_URL,
+                "SESSION_COOKIE": "cookie",
+                "STATE_FILE": str(state_file),
+                "FORCE_CHECK": "true",
+                "SMTP_USERNAME": "sender@example.test",
+                "SMTP_PASSWORD": "app-password",
+            }
+            stdout = StringIO()
+            with mock.patch.dict(os.environ, env, clear=True), \
+                 mock.patch.object(gm, "fetch_transcript", side_effect=gm.PortalUnavailableError("Page will be available from 17:00")), \
+                 mock.patch.object(gm, "send_email") as send_email, \
+                 redirect_stdout(stdout):
+                self.assertEqual(gm.run(force=False), 0)
+
+            send_email.assert_not_called()
+            self.assertFalse(state_file.exists())
+            self.assertIn("Portal unavailable", stdout.getvalue())
+
     def test_run_send_current_emails_snapshot_even_without_change(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             env = {
@@ -555,6 +599,16 @@ class GradeMonitorTests(unittest.TestCase):
              mock.patch.object(gm, "send_email") as send_email, \
              mock.patch("sys.stderr", new=StringIO()):
             self.assertEqual(gm.main(), 1)
+
+        send_email.assert_not_called()
+
+    def test_main_skips_portal_unavailable_without_failure_email(self) -> None:
+        with mock.patch.dict(os.environ, {"SMTP_USERNAME": "sender@example.test", "SMTP_PASSWORD": "app-password"}, clear=True), \
+             mock.patch.object(sys, "argv", ["grade_monitor.py"]), \
+             mock.patch.object(gm, "run", side_effect=gm.PortalUnavailableError("Page will be available from 17:00")), \
+             mock.patch.object(gm, "send_email") as send_email, \
+             redirect_stdout(StringIO()):
+            self.assertEqual(gm.main(), 0)
 
         send_email.assert_not_called()
 

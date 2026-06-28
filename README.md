@@ -127,6 +127,8 @@ The workflow also runs the automated unit tests before each scheduled check.
 
 The monitor is configured to fail loudly. If auth, GUC access, parsing, or state handling fails during a scheduled check and SMTP is configured, it sends a `GUC grade monitor failed` email instead of failing silently.
 
+If GUC redirects the transcript page to a temporary message such as `Page will be available from 17:00`, the monitor treats that as a skipped check. It does not email, does not update state, and waits for the next scheduled run.
+
 There is also a final GitHub Actions fallback alert. If the workflow itself fails before the monitor can run, for example during dependency installation or tests, it sends `GUC grade monitor workflow failed`.
 
 ## Local dry run
@@ -164,6 +166,7 @@ The tests cover:
 - course-evaluation prompt detection inside or outside the transcript region
 - wrong-year transcript rejection
 - volatile footer date normalization
+- temporary GUC availability-message skip handling
 - rejection of empty or unrelated pages
 - login-page detection
 - state-file read/write and invalid-state handling
@@ -176,6 +179,7 @@ The tests cover:
 ## If it breaks
 
 - `AUTH ERROR`: the credentials are wrong, the username needs the `GUC\` domain prefix, or GUC blocks GitHub's cloud IPs.
+- `Page will be available from ...`: GUC is deliberately hiding the transcript page for that period. The monitor skips that check without sending a failure email.
 - `No visible transcript text found`, `Could not find transcript content`, or `does not mention the configured academic year`: GitHub Actions reached a page, but it was not the expected transcript body for `TARGET_YEAR`. Keep the failure email and GitHub Actions logs so the extractor can be adjusted against the actual page shape.
 - No email on the first successful run is expected; that run only creates the baseline.
 - If the university adds CAPTCHA or MFA, this monitor should stop and require a different authorized flow. Do not bypass CAPTCHA or MFA.
